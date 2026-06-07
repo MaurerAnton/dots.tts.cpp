@@ -153,51 +153,50 @@ int main(int argc, char ** argv) {
             float t = (float)step * dt;
 
             // Build proper DiT FM conditioning buffer
-            // hidden_proj(text) + latent_proj(history) + noise at end
-            int cond_seq = 32;
+            // Positions: [hidden_proj(text) | latent_proj(history) | noise]
+            int cond_seq = n_tok + history_len + patch_size;
+            if (cond_seq < 8) cond_seq = 8; // minimum for stable attention
             ggml_reset(gctx);
             ggml_tensor * dx = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
             {
                 float * dd = tensor_data(dx);
                 memset(dd, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
                 
-                // hidden_proj at text positions (start of sequence)
+                // hidden_proj at text positions (start)
                 if (n_tok > 0)
                     memcpy(dd, cond_llm_data, n_tok * DIT_HIDDEN_SIZE * sizeof(float));
                 
-                // latent_proj of history latents (after text)
-                int hist_pos = n_tok;
+                // latent_proj of history latents (after text, before noise)
                 if (dit.latent_proj_w && history_len > 0) {
-                    float * lw = tensor_data(dit.latent_proj_w); // [128, 1024] in ggml
-                    for (int h = 0; h < history_len && hist_pos + h < cond_seq - patch_size; h++) {
-                        float * out_pos = dd + (hist_pos + h) * DIT_HIDDEN_SIZE;
+                    float * lw = tensor_data(dit.latent_proj_w);
+                    for (int h = 0; h < history_len; h++) {
+                        float * out_pos = dd + (n_tok + h) * DIT_HIDDEN_SIZE;
                         float * hist_vec = history_latents + h * latent_dim;
                         for (int j = 0; j < DIT_HIDDEN_SIZE; j++) {
                             float s = 0;
                             for (int k = 0; k < latent_dim; k++)
                                 s += hist_vec[k] * lw[k * 1024 + j];
-                            out_pos[j] += s;
+                            out_pos[j] = s;
                         }
                     }
                 }
                 
-                // Coordinate projection of noise (at last patch_size positions)
-                int noise_start = cond_seq - patch_size;
+                // Noise at positions right after text+history (projected through coord_proj)
+                int noise_pos = n_tok + history_len;
                 for (int i = 0; i < patch_size; i++) {
-                    float * out_pos = dd + (noise_start + i) * DIT_HIDDEN_SIZE;
-                    // coord = z_t projected through coord_proj
+                    float * out_pos = dd + (noise_pos + i) * DIT_HIDDEN_SIZE;
                     if (dit.coord_proj_w) {
-                        float * cw = tensor_data(dit.coord_proj_w); // [128, 1024]
-                        float * noise_vec = z_t + i * latent_dim;
+                        float * cw = tensor_data(dit.coord_proj_w);
+                        float * nv = z_t + i * latent_dim;
                         for (int j = 0; j < DIT_HIDDEN_SIZE; j++) {
                             float s = 0;
                             for (int k = 0; k < latent_dim; k++)
-                                s += noise_vec[k] * cw[k * 1024 + j]; // coord_proj(noise)
-                            out_pos[j] += s;
+                                s += nv[k] * cw[k * 1024 + j];
+                            out_pos[j] = s;
                         }
                     } else {
                         for (int j = 0; j < latent_dim && j < DIT_HIDDEN_SIZE; j++)
-                            out_pos[j] += z_t[i * latent_dim + j];
+                            out_pos[j] = z_t[i * latent_dim + j];
                     }
                 }
             }
@@ -241,11 +240,28 @@ int main(int argc, char ** argv) {
     delete[] v_t;
     delete[] history_latents;
 
-    // VAE per-channel normalization
+    // VAE per-channel re-standardization + mapping
+    // Step 1: compute per-channel mean/std of our latents
+    float our_mean[128] = {0}, our_std[128] = {0};
     for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++)
-            all_latents[f * VAE_LATENT_DIM + c] =
-                (all_latents[f * VAE_LATENT_DIM + c] - VAE_MEAN[c]) / VAE_STD[c];
+            our_mean[c] += all_latents[f * VAE_LATENT_DIM + c];
+    for (int c = 0; c < VAE_LATENT_DIM; c++) our_mean[c] /= total_frames;
+    for (int f = 0; f < total_frames; f++)
+        for (int c = 0; c < VAE_LATENT_DIM; c++) {
+            float d = all_latents[f * VAE_LATENT_DIM + c] - our_mean[c];
+            our_std[c] += d * d;
+        }
+    for (int c = 0; c < VAE_LATENT_DIM; c++)
+        our_std[c] = sqrtf(our_std[c] / total_frames + 0.01f); // epsilon
+    
+    // Step 2: standardize to N(0,1), then map to VAE space
+    for (int f = 0; f < total_frames; f++)
+        for (int c = 0; c < VAE_LATENT_DIM; c++) {
+            float z = (all_latents[f * VAE_LATENT_DIM + c] - our_mean[c]) / our_std[c];
+            all_latents[f * VAE_LATENT_DIM + c] = z * VAE_STD[c] + VAE_MEAN[c];
+        }
+    printf("  Latents mapped to VAE space\n");
 
     // Export latents for Python vocoder verification
     FILE * lf = fopen("latents.bin", "wb");
