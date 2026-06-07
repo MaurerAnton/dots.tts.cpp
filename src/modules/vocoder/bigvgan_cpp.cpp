@@ -31,8 +31,9 @@ static const float AA_FILTER[12] = {
 //   return self.downsample(x) # pad replicate → conv1d(filter, stride=2, groups=C)
 
 // Causal UpSample1d: NO pad → conv_transpose1d → scale ×2 → trim last (K-stride)
+// filter: [filter_ch, 1, K] — for AMP filter_ch=1, for activation_post filter_ch=ch
 static void aa_upsample(float * out, const float * in, int ch, int in_len,
-                         const float * filter, int * olen) {
+                         const float * filter, int filter_ch, int * olen) {
     *olen = in_len * 2;
     int K = 12, stride = 2;
     // No padding for causal mode
@@ -44,8 +45,8 @@ static void aa_upsample(float * out, const float * in, int ch, int in_len,
         for (int k = 0; k < K; k++) {
             int ot = i * stride + k;
             if (ot >= 0 && ot < olen_full) {
-                float f = filter[k];
                 for (int c = 0; c < ch; c++) {
+                    float f = (filter_ch == 1) ? filter[k] : filter[c * K + k];
                     out[ot * ch + c] += in[i * ch + c] * f * 2.0f; // ratio=2 scale
                 }
             }
@@ -58,8 +59,9 @@ static void aa_upsample(float * out, const float * in, int ch, int in_len,
 }
 
 // Causal LowPassFilter1d (DownSample1d): pad([K-1], [replicate]) → conv1d(stride=2, groups=ch)
+// filter: [filter_ch, 1, K]
 static void aa_downsample(float * out, const float * in, int ch, int in_len,
-                           const float * filter, int * olen) {
+                           const float * filter, int filter_ch, int * olen) {
     int K = 12, stride = 2;
     int pad_left = K - 1; // 11
     int padded_len = in_len + pad_left;
@@ -76,7 +78,8 @@ static void aa_downsample(float * out, const float * in, int ch, int in_len,
             float s = 0;
             for (int k = 0; k < K; k++) {
                 int idx = (t * stride + k) * ch + c;
-                s += padded[idx] * filter[k];
+                float fk = (filter_ch == 1) ? filter[k] : filter[c * K + k];
+                s += padded[idx] * fk;
             }
             out[t * ch + c] = s;
         }
@@ -86,11 +89,15 @@ static void aa_downsample(float * out, const float * in, int ch, int in_len,
 
 // Full Activation1d (union of up + snakebeta + down)
 // buf_a/buf_b: temp buffers sized for upsampled output
+// filter_up/down: [1,1,12] for AMP (shared), [ch,1,12] for activation_post (per-channel)
 static void aa_snakebeta(float * x, int cur_len, int ch,
                           const float * alpha, const float * beta, bool logscale,
-                          float * buf_up, float * buf_down, int max_up_len) {
+                          float * buf_up, float * buf_down, int max_up_len,
+                          const float * filter_up = AA_FILTER,
+                          const float * filter_down = AA_FILTER,
+                          int filter_ch = 1) {
     int up_len;
-    aa_upsample(buf_up, x, ch, cur_len, AA_FILTER, &up_len);
+    aa_upsample(buf_up, x, ch, cur_len, filter_up, filter_ch, &up_len);
     // SnakeBeta on upsampled
     for (int i = 0; i < up_len; i++) {
         for (int c = 0; c < ch; c++) {
@@ -112,7 +119,7 @@ static void aa_snakebeta(float * x, int cur_len, int ch,
         }
     }
     int down_len;
-    aa_downsample(buf_down, buf_up, ch, up_len, AA_FILTER, &down_len);
+    aa_downsample(buf_down, buf_up, ch, up_len, filter_down, filter_ch, &down_len);
     memcpy(x, buf_down, down_len * ch * sizeof(float));
 }
 
@@ -245,6 +252,8 @@ bool bigvgan_load(const char * sf_path, BigVGANDecoder & dec) {
 
     dec.act_post_alpha = load_raw_st(sf, "decoder.activation_post.act.alpha");
     dec.act_post_beta  = load_raw_st(sf, "decoder.activation_post.act.beta");
+    dec.act_post_filter_up = load_raw_st(sf, "decoder.activation_post.upsample.filter");
+    dec.act_post_filter_down = load_raw_st(sf, "decoder.activation_post.downsample.lowpass.filter");
 
     // post_proj + dec_mi_layer
     dec.post_proj_w = load_raw_st(sf, "post_proj.weight");
@@ -447,7 +456,10 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     // === activation_post ===
     aa_snakebeta(x, cur_len, cur_ch,
                  dec.act_post_alpha.ptr(), dec.act_post_beta.ptr(),
-                 true, act_up, act_down, max_len * 2);
+                 true, act_up, act_down, max_len * 2,
+                 dec.act_post_filter_up.ptr(),
+                 dec.act_post_filter_down.ptr(),
+                 cur_ch);
     { float rms=0; for(int i=0;i<cur_len*cur_ch;i++) rms+=x[i]*x[i];
       printf("  activation_post: rms=%.4f\n", sqrtf(rms/(cur_len*cur_ch))); }
 

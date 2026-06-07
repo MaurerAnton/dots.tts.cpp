@@ -21,6 +21,7 @@ struct BigVGANDecoder {
     
     BigVGANTensor conv_post_w; // NO bias (use_bias_at_final=False)
     BigVGANTensor act_post_alpha, act_post_beta;
+    BigVGANTensor act_post_filter_up, act_post_filter_down; // per-channel [ch,1,12]
     
     // post_proj + dec_mi_layer (bottleneck)
     BigVGANTensor post_proj_w, post_proj_b;

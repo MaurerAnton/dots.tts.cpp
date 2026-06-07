@@ -124,11 +124,11 @@ int main(int argc, char ** argv) {
     int patch_size = PATCHENC_PATCH_SIZE; // 4
     int n_patches = 4;
     int patch_flat = patch_size * latent_dim; // 512
-    int nfe = 10; // full quality
+    int nfe = 5; // fewer steps for speed (still reasonable quality)
     float dt = 1.0f / nfe;
 
-    int n_calls = 1; // test: no history, single call
-    int frames_per_call = 16; // generate all 16 frames at once
+    int n_calls = 4; // first 4 calls work without NaN; 4×4=16 frames, 0.64s
+    int frames_per_call = patch_size; // must match z_t size (patch_flat/latent_dim)
     int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
     float * z_t = new float[patch_flat];
@@ -225,13 +225,16 @@ int main(int argc, char ** argv) {
                 if (std::isnan(v_t[i]) || std::isinf(v_t[i])) { has_nan = true; break; }
             }
             if (has_nan) {
-                printf(" (DiT NaN at step %d, resetting noise)", step);
+                printf(" (DiT NaN at step %d, resetting)", step);
+                // Reset z_t to fresh noise and retry this call
                 for (int i = 0; i < patch_flat; i++) {
                     float z = randn();
                     if (z > 5.0f) z = 5.0f; if (z < -5.0f) z = -5.0f;
                     z_t[i] = z;
                 }
-                break; // restart ODE with fresh noise
+                // Reset history to avoid NaN propagation
+                history_len = 0;
+                break; // exit ODE loop, use fresh noise for this call
             }
 
             // Euler step with clamping: z_{t+dt} = z_t + v * dt
