@@ -156,6 +156,7 @@ int main(int argc, char ** argv) {
             // Positions: [hidden_proj(text) | latent_proj(history) | noise]
             int cond_seq = n_tok + history_len + patch_size;
             if (cond_seq < 8) cond_seq = 8; // minimum for stable attention
+            int noise_pos = n_tok + history_len;
             ggml_reset(gctx);
             ggml_tensor * dx = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
             {
@@ -182,7 +183,6 @@ int main(int argc, char ** argv) {
                 }
                 
                 // Noise at positions right after text+history (projected through coord_proj)
-                int noise_pos = n_tok + history_len;
                 for (int i = 0; i < patch_size; i++) {
                     float * out_pos = dd + (noise_pos + i) * DIT_HIDDEN_SIZE;
                     if (dit.coord_proj_w) {
@@ -213,9 +213,31 @@ int main(int argc, char ** argv) {
             ggml_build_forward_expand(dgf, dout);
             ggml_graph_compute_with_ctx(gctx, dgf, 8);
 
-            // Extract velocity for last patch_size positions
+            // CFG: run unconditional (zero conditioning) and blend
+            // Python uses guidance_scale=1.2
+            float cfg_scale = 1.2f;
+            ggml_reset(gctx);
+            // Build unconditional input: same as dx but all zeros (no text/history conditioning)
+            ggml_tensor * dx_uncond = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
+            memset(tensor_data(dx_uncond), 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
+            // Only copy noise positions (the noise is the same)
+            for (int i = 0; i < patch_size; i++) {
+                float * src = tensor_data(dx) + (noise_pos + i) * DIT_HIDDEN_SIZE;
+                float * dst = tensor_data(dx_uncond) + (noise_pos + i) * DIT_HIDDEN_SIZE;
+                memcpy(dst, src, DIT_HIDDEN_SIZE * sizeof(float));
+            }
+            dx_uncond = ggml_cont(gctx, ggml_permute(gctx, dx_uncond, 2, 1, 0, 3));
+            
+            ggml_tensor * dout_uncond = dit_forward(dit, gctx, dx_uncond, ti, nullptr);
+            ggml_cgraph * dgf2 = ggml_new_graph(gctx);
+            ggml_build_forward_expand(dgf2, dout_uncond);
+            ggml_graph_compute_with_ctx(gctx, dgf2, 8);
+
+            // Blend: v = v_uncond + cfg_scale * (v_cond - v_uncond)
             float * vdata = tensor_data(dout);
-            for (int i = 0; i < patch_flat; i++) v_t[i] = vdata[i];
+            float * vdata_uncond = tensor_data(dout_uncond);
+            for (int i = 0; i < patch_flat; i++)
+                v_t[i] = vdata_uncond[i] + cfg_scale * (vdata[i] - vdata_uncond[i]);
 
             // Euler step: z_{t+dt} = z_t + v * dt
             for (int i = 0; i < patch_flat; i++) z_t[i] += v_t[i] * dt;
