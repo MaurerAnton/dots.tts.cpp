@@ -7,6 +7,12 @@
 #include <cstdio>
 #include <cstdlib>
 
+// LSTM forward declaration (defined in lstm.cpp)
+void lstm_forward(const float * x, int seq_len, int hidden, int n_layers,
+    const float * w_ih[4], const float * w_hh[4],
+    const float * b_ih[4], const float * b_hh[4],
+    float * out, bool skip);
+
 static BigVGANTensor load_raw_st(SafeTensorsFile & sf, const char * name) {
     BigVGANTensor t; t.n0 = t.n1 = t.n2 = 1;
     const st_tensor_info * info = sf.find(name);
@@ -115,6 +121,25 @@ bool bigvgan_load(const char * sf_path, BigVGANDecoder & dec) {
     dec.conv_post_b = load_raw_st(sf, "decoder.conv_post.bias");
     dec.act_post_alpha = load_raw_st(sf, "decoder.activation_post.act.alpha");
     dec.act_post_beta  = load_raw_st(sf, "decoder.activation_post.act.beta");
+    
+    // post_proj + dec_mi_layer (bottleneck between latents and decoder)
+    dec.post_proj_w = load_raw_st(sf, "post_proj.weight");
+    dec.post_proj_b = load_raw_st(sf, "post_proj.bias");
+    dec.mi_w1 = load_raw_st(sf, "dec_mi_layer.0.weight");
+    dec.mi_b1 = load_raw_st(sf, "dec_mi_layer.0.bias");
+    dec.mi_w2 = load_raw_st(sf, "dec_mi_layer.2.weight");
+    dec.mi_b2 = load_raw_st(sf, "dec_mi_layer.2.bias");
+    for (int l = 0; l < 4; l++) {
+        char name[128];
+        snprintf(name, sizeof(name), "dec_mi_layer.1.lstm.weight_ih_l%d", l);
+        dec.mi_lstm_w_ih[l] = load_raw_st(sf, name);
+        snprintf(name, sizeof(name), "dec_mi_layer.1.lstm.weight_hh_l%d", l);
+        dec.mi_lstm_w_hh[l] = load_raw_st(sf, name);
+        snprintf(name, sizeof(name), "dec_mi_layer.1.lstm.bias_ih_l%d", l);
+        dec.mi_lstm_b_ih[l] = load_raw_st(sf, name);
+        snprintf(name, sizeof(name), "dec_mi_layer.1.lstm.bias_hh_l%d", l);
+        dec.mi_lstm_b_hh[l] = load_raw_st(sf, name);
+    }
     sf.close();
 
     int loaded = (dec.conv_pre_w.data.size() > 0) + (dec.conv_post_w.data.size() > 0);
@@ -135,8 +160,57 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     dec.buf1.resize(max_len * max_ch); dec.buf2.resize(max_len * max_ch);
     float * x = dec.buf1.data(), * tmp = dec.buf2.data();
 
-    // Pre-conv: 128 -> 1536, kernel=5
-    conv1d(x, latent, 128, n_frames, dec.conv_pre_w.ptr(), dec.conv_pre_b.ptr(), 1536, 5);
+    // === Bottleneck: post_proj -> dec_mi_layer ===
+    // post_proj: Conv1d 128->128, kernel=1
+    conv1d(tmp, latent, 128, n_frames, dec.post_proj_w.ptr(), dec.post_proj_b.ptr(), 128, 1);
+    // dec_mi_layer: Linear(128->512) -> LSTM(4x512) -> Linear(512->128)
+    float * mi_buf = (float*)malloc(n_frames * 512 * sizeof(float));
+    // Linear 128->512
+    for (int t = 0; t < n_frames; t++)
+        for (int o = 0; o < 512; o++) {
+            float s = dec.mi_b1.ptr()[o];
+            for (int i = 0; i < 128; i++)
+                s += tmp[t * 128 + i] * dec.mi_w1.ptr()[o * 128 + i];
+            mi_buf[t * 512 + o] = s;
+        }
+    // LSTM
+    const float * w_ih[4] = {dec.mi_lstm_w_ih[0].ptr(), dec.mi_lstm_w_ih[1].ptr(),
+                              dec.mi_lstm_w_ih[2].ptr(), dec.mi_lstm_w_ih[3].ptr()};
+    const float * w_hh[4] = {dec.mi_lstm_w_hh[0].ptr(), dec.mi_lstm_w_hh[1].ptr(),
+                              dec.mi_lstm_w_hh[2].ptr(), dec.mi_lstm_w_hh[3].ptr()};
+    const float * b_ih[4] = {dec.mi_lstm_b_ih[0].ptr(), dec.mi_lstm_b_ih[1].ptr(),
+                              dec.mi_lstm_b_ih[2].ptr(), dec.mi_lstm_b_ih[3].ptr()};
+    const float * b_hh[4] = {dec.mi_lstm_b_hh[0].ptr(), dec.mi_lstm_b_hh[1].ptr(),
+                              dec.mi_lstm_b_hh[2].ptr(), dec.mi_lstm_b_hh[3].ptr()};
+    float * lstm_out = (float*)malloc(n_frames * 512 * sizeof(float));
+    lstm_forward(mi_buf, n_frames, 512, 4, w_ih, w_hh, b_ih, b_hh, lstm_out, true);
+    // Linear 512->128
+    for (int t = 0; t < n_frames; t++)
+        for (int o = 0; o < 128; o++) {
+            float s = dec.mi_b2.ptr()[o];
+            for (int i = 0; i < 512; i++)
+                s += lstm_out[t * 512 + i] * dec.mi_w2.ptr()[o * 512 + i];
+            tmp[t * 128 + o] = s;
+        }
+    free(mi_buf); free(lstm_out);
+    { float rms=0; for(int i=0;i<n_frames*128;i++) rms+=tmp[i]*tmp[i];
+      printf("  after bottleneck: rms=%.4f\n", sqrtf(rms/(n_frames*128))); }
+
+    // Pre-conv: 128 -> 1536, kernel=5, NON-CAUSAL (matches Python)
+    // Python: Conv1d(128, 1536, 5, causal=False)
+    for (int o = 0; o < 1536; o++) {
+        float b = dec.conv_pre_b.ptr()[o];
+        for (int t = 0; t < n_frames; t++) {
+            float s = b;
+            for (int k = 0; k < 5; k++) {
+                int it = t + k - 2; // center padding, non-causal
+                if (it >= 0 && it < n_frames)
+                    for (int c = 0; c < 128; c++)
+                        s += tmp[it * 128 + c] * dec.conv_pre_w.ptr()[(o * 128 + c) * 5 + k];
+            }
+            x[t * 1536 + o] = s;
+        }
+    }
     // Debug: check pre-conv output
     { float s=0; int nz=0; for(int i=0;i<n_frames*1536;i++){if(x[i]!=0)nz++;s+=x[i]*x[i];}
       printf("  pre-conv: rms=%.4f nz=%d/%d\n", sqrtf(s/(n_frames*1536)), nz, n_frames*1536); }
@@ -147,6 +221,8 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
         int oc = dec.ups_out_ch[s], stride = dec.ups_stride[s], K = dec.ups_kernel[s];
         convT1d(tmp, x, cur_ch, cur_len, dec.ups_w[s].ptr(), dec.ups_b[s].ptr(), oc, stride, K);
         cur_ch = oc; cur_len *= stride;
+        { float rms=0; for(int i=0;i<cur_len*cur_ch;i++) rms+=tmp[i]*tmp[i];
+          printf("  stage %d ups: rms=%.4f\n", s, sqrtf(rms/(cur_len*cur_ch))); }
 
         memset(x, 0, cur_len * cur_ch * sizeof(float));
         int ch = dec.ups_out_ch[s];
@@ -166,6 +242,8 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
             }
         }
         float * sw = x; x = tmp; tmp = sw;
+        { float rms=0; for(int i=0;i<cur_len*cur_ch;i++) rms+=x[i]*x[i];
+          printf("  stage %d amp: rms=%.4f\n", s, sqrtf(rms/(cur_len*cur_ch))); }
     }
 
     snakebeta(x, cur_len, cur_ch, dec.act_post_alpha.ptr(), dec.act_post_beta.ptr());
