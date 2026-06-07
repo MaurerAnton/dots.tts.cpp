@@ -74,7 +74,7 @@ target_include_directories(e2e_pipeline PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
 )
-target_link_libraries(e2e_pipeline PRIVATE ggml pthread m)
+target_link_libraries(e2e_pipeline PRIVATE ${LLAMA_LIB} ggml pthread m)
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
