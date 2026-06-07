@@ -80,3 +80,19 @@ find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(dots_tts PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# ---- Standalone vocoder test ---- 
+add_executable(test_vocoder
+    test_vocoder.cpp
+    src/modules/vocoder/bigvgan_cpp.cpp
+    src/modules/vocoder/lstm.cpp
+    src/utils/safetensors.cpp
+)
+target_include_directories(test_vocoder PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/common
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_vocoder PRIVATE ggml pthread m)
