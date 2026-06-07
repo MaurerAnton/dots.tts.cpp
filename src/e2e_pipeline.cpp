@@ -127,8 +127,8 @@ int main(int argc, char ** argv) {
     int nfe = 10; // ODE steps per patch
     float dt = 1.0f / nfe;
 
-    int n_calls = 8;  // 8 calls x 2 good frames = 16 total
-    int frames_per_call = 2;
+    int n_calls = 16; // 16 calls x 1 strong frame = 16 total
+    int frames_per_call = 1;
     int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
     float * z_t = new float[patch_flat];
@@ -246,11 +246,10 @@ int main(int argc, char ** argv) {
         // Store generated latent (scale to match VAE prior ~N(0,1))
         float scale = 0.45f; // RMS 2.2 -> 1.0 (VAE prior)
         for (int i = 0; i < patch_flat; i++) z_t[i] *= scale;
-        memcpy(all_latents + total_frames * latent_dim, z_t, 2 * latent_dim * sizeof(float));
-        // Store first 2 frames in history
-        memcpy(history_latents + history_len * latent_dim, z_t, 2 * latent_dim * sizeof(float));
-        history_len += 2;
-        total_frames += 2;
+        memcpy(all_latents + total_frames * latent_dim, z_t, 1 * latent_dim * sizeof(float));
+        memcpy(history_latents + history_len * latent_dim, z_t, 1 * latent_dim * sizeof(float));
+        history_len += 1;
+        total_frames += 1;
         
         float ms = 0;
         for (int i = 0; i < patch_flat; i++) ms += z_t[i] * z_t[i];
