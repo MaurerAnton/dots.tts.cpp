@@ -127,8 +127,8 @@ int main(int argc, char ** argv) {
     int nfe = 10; // full quality
     float dt = 1.0f / nfe;
 
-    int n_calls = 16;
-    int frames_per_call = 1;
+    int n_calls = 1; // test: no history, single call
+    int frames_per_call = 16; // generate all 16 frames at once
     int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
     float * z_t = new float[patch_flat];
@@ -224,10 +224,15 @@ int main(int argc, char ** argv) {
         // Store generated latent (scale to match VAE prior ~N(0,1))
         float scale = 0.45f; // RMS 2.2 -> 1.0 (VAE prior)
         for (int i = 0; i < patch_flat; i++) z_t[i] *= scale;
-        memcpy(all_latents + total_frames * latent_dim, z_t, 1 * latent_dim * sizeof(float));
-        memcpy(history_latents + history_len * latent_dim, z_t, 1 * latent_dim * sizeof(float));
+        memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
+        // Store in history with clipping
+        for (int i = 0; i < latent_dim; i++) {
+            float v = z_t[i];
+            if (v > 5.0f) v = 5.0f; if (v < -5.0f) v = -5.0f;
+            history_latents[history_len * latent_dim + i] = v;
+        }
         history_len += 1;
-        total_frames += 1;
+        total_frames += frames_per_call;
         
         float ms = 0;
         for (int i = 0; i < patch_flat; i++) ms += z_t[i] * z_t[i];

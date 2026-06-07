@@ -390,7 +390,7 @@ static ggml_tensor * dit_block_forward_simple(
     }
     h = ggml_add(ctx, h, shift_msa_tok);
 
-    // Multi-head attention
+    // Multi-head attention (manual per-head loop)
     ggml_tensor * attn = dit_attention_multihead(ctx, h,
         block.attn_q_weight, block.attn_k_weight, block.attn_v_weight,
         block.attn_o_weight,
