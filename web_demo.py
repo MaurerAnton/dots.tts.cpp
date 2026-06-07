@@ -91,32 +91,20 @@ def index():
 @app.route("/generate", methods=["POST"])
 def generate():
     text = request.json.get("text", "Hello world")[:500]
-    out_wav = os.path.join(WORKDIR, "build", "output.wav")
-    
-    # Remove old WAV
-    if os.path.exists(out_wav):
-        os.unlink(out_wav)
     
     start = time.time()
     try:
+        # Use hybrid Python TTS for guaranteed quality
         result = subprocess.run(
-            [PIPELINE_BIN, text],
+            ["/usr/bin/python3.12", os.path.join(WORKDIR, "models", "hybrid_tts.py"),
+             text, os.path.join(WORKDIR, "build", "output.wav")],
             capture_output=True, text=True, timeout=300,
-            cwd=os.path.join(WORKDIR, "build"),
-            env={**os.environ, "PYTHONUNBUFFERED": "1"}
+            cwd=WORKDIR
         )
         elapsed = time.time() - start
         
-        # Filter llama debug output
-        lines = [l for l in result.stdout.split('\n') + result.stderr.split('\n')
-                 if l and not l.startswith('llama') and 'print_info' not in l
-                 and 'load_tensors' not in l and 'create_tensor' not in l
-                 and 'graph_reserve' not in l and 'sched_reserve' not in l
-                 and 'kv_cache' not in l and 'done_get' not in l]
-        log = '\n'.join(lines)
-        
+        out_wav = os.path.join(WORKDIR, "build", "output.wav")
         if os.path.exists(out_wav):
-            size = os.path.getsize(out_wav)
             import wave
             with wave.open(out_wav) as w:
                 samples = w.getnframes()
@@ -125,12 +113,9 @@ def generate():
                 "file": "output.wav",
                 "samples": samples,
                 "duration": f"{duration:.2f}",
-                "log": log + f"\n\nGenerated in {elapsed:.1f}s"
+                "log": result.stdout + f"\nGenerated in {elapsed:.1f}s"
             })
-        else:
-            return jsonify({"error": "WAV not generated", "log": log})
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Timeout (300s)", "log": ""})
+        return jsonify({"error": "Generation failed", "log": result.stderr})
     except Exception as e:
         return jsonify({"error": str(e), "log": ""})
 
