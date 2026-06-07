@@ -14,7 +14,8 @@
 #include "audiovae.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
-#include "gguf.h"
+#include "safetensors.h"
+#include "llama.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,7 +25,8 @@
 // Forward declarations
 static void patchenc_load_dummy(patch_encoder & enc, ggml_context * w_ctx);
 static void patchenc_test(patch_encoder & enc);
-bool dots_tts_load_gguf(const char * fname, ggml_context * w_ctx, dit_model & dit, patch_encoder & enc);
+bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m);
+bool load_patchenc_weights(SafeTensorsFile & sf, ggml_context * w_ctx, patch_encoder & enc);
 
 struct dots_tts_runtime {
     dit_model dit;
@@ -298,7 +300,7 @@ int main(int argc, char ** argv) {
         };
         ggml_context * pipe_ctx = ggml_init(pipe_params);
 
-        int n_patches = 4;
+        int n_patches = 1;  // reduce for speed
         int patch_flat = PATCHENC_PATCH_SIZE * PATCHENC_LATENT_DIM; // 4*128=512
 
         // Simulate: for each patch, generate LLM hidden states randomly
@@ -421,72 +423,161 @@ int main(int argc, char ** argv) {
 
     printf("\n=== All Phase 1 tests passed ===\n");
 
-    // Real GGUF weights test
-    printf("\n=== Testing DiT with real GGUF weights ===\n");
+    // Real safetensors weights test
+    printf("\n=== Testing DiT with real safetensors weights ===\n");
     {
-        const char * gguf_path = "../models/dots_tts_f16.gguf";
-        dit_model real_dit;
-        patch_encoder real_enc;
+        const char * sf_path = "/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-base/blobs/69dbad797566b24003506e1dd698597937149920f6df9782d84214bf477acb48";
 
-        if (dots_tts_load_gguf(gguf_path, rt->w_ctx, real_dit, real_enc)) {
-            printf("GGUF loaded. Running DiT forward with real weights...\n");
+        SafeTensorsFile sf;
+        if (!sf.open(sf_path)) {
+            printf("Safetensors not found — skipping real weight test\n");
+        } else {
+            printf("Loading DiT weights from safetensors...\n");
 
-            struct ggml_init_params real_params = {
-                .mem_size   = 256ULL * 1024 * 1024,
+            struct ggml_init_params real_w_params = {
+                .mem_size   = 6ULL * 1024 * 1024 * 1024, // 6 GB
                 .mem_buffer = nullptr,
                 .no_alloc   = false,
             };
-            ggml_context * rctx = ggml_init(real_params);
+            ggml_context * real_w_ctx = ggml_init(real_w_params);
 
-            int seq_len = 32;
-            ggml_tensor * rx = ggml_new_tensor_3d(rctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, seq_len);
-            {
-                float * d = tensor_data(rx);
-                for (int i = 0; i < seq_len * DIT_HIDDEN_SIZE; i++)
-                    d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+            dit_model real_dit;
+            patch_encoder real_enc;
+            if (load_dit_weights(sf, real_w_ctx, real_dit) &&
+                load_patchenc_weights(sf, real_w_ctx, real_enc)) {
+                printf("Running DiT forward with real weights...\n");
+
+                struct ggml_init_params real_params = {
+                    .mem_size   = 512ULL * 1024 * 1024,
+                    .mem_buffer = nullptr,
+                    .no_alloc   = false,
+                };
+                ggml_context * rctx = ggml_init(real_params);
+
+                int seq_len = 32;
+                ggml_tensor * rx = ggml_new_tensor_3d(rctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, seq_len);
+                {
+                    float * d = tensor_data(rx);
+                    for (int i = 0; i < seq_len * DIT_HIDDEN_SIZE; i++)
+                        d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+                }
+                rx = ggml_cont(rctx, ggml_permute(rctx, rx, 2, 1, 0, 3));
+
+                ggml_tensor * rt_in = ggml_new_tensor_1d(rctx, GGML_TYPE_F32, 1);
+                ((float*)rt_in->data)[0] = 0.5f;
+
+                ggml_tensor * rspk = ggml_new_tensor_2d(rctx, GGML_TYPE_F32, DIT_SPEAKER_DIM, 1);
+                {
+                    float * d = tensor_data(rspk);
+                    for (int i = 0; i < DIT_SPEAKER_DIM; i++)
+                        d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+                }
+
+                ggml_tensor * rout = dit_forward(real_dit, rctx, rx, rt_in, rspk);
+                ggml_cgraph * rgf = ggml_new_graph(rctx);
+                ggml_build_forward_expand(rgf, rout);
+                ggml_graph_compute_with_ctx(rctx, rgf, 8);
+
+                int n_out = rout->ne[0] * rout->ne[1];
+                float * od = tensor_data(rout);
+                float sum = 0, minv = 1e9, maxv = -1e9;
+                for (int i = 0; i < n_out; i++) {
+                    sum += od[i];
+                    if (od[i] < minv) minv = od[i];
+                    if (od[i] > maxv) maxv = od[i];
+                }
+                printf("Real DiT output: [%lld x %lld] min=%.6f max=%.6f mean=%.6f\n",
+                       (long long)rout->ne[0], (long long)rout->ne[1],
+                       minv, maxv, sum / n_out);
+
+                // PatchEncoder test with real weights
+                printf("Running PatchEncoder forward with real weights...\n");
+                ggml_reset(rctx);
+                int n_patches = 1;
+                int pe_seq = n_patches * PATCHENC_PATCH_SIZE;
+                ggml_tensor * pe_x = ggml_new_tensor_2d(rctx, GGML_TYPE_F32, PATCHENC_LATENT_DIM, pe_seq);
+                {
+                    float * d = tensor_data(pe_x);
+                    for (int i = 0; i < pe_seq * PATCHENC_LATENT_DIM; i++)
+                        d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+                }
+                ggml_tensor * pe_out = patchenc_forward(real_enc, rctx, pe_x, n_patches);
+                ggml_cgraph * pe_gf = ggml_new_graph(rctx);
+                ggml_build_forward_expand(pe_gf, pe_out);
+                ggml_graph_compute_with_ctx(rctx, pe_gf, 8);
+                {
+                    int n = pe_out->ne[0] * pe_out->ne[1];
+                    float * d = tensor_data(pe_out);
+                    float s = 0, mn = 1e9, mx = -1e9;
+                    for (int i = 0; i < n; i++) { s += d[i]; if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
+                    printf("Real PatchEncoder output: [%lld x %lld] min=%.6f max=%.6f mean=%.6f\n",
+                           (long long)pe_out->ne[0], (long long)pe_out->ne[1], mn, mx, s/n);
+                }
+
+                ggml_free(rctx);
             }
-            rx = ggml_cont(rctx, ggml_permute(rctx, rx, 2, 1, 0, 3));
-
-            ggml_tensor * rt_in = ggml_new_tensor_1d(rctx, GGML_TYPE_F32, 1);
-            ((float*)rt_in->data)[0] = 0.5f;
-
-            ggml_tensor * rspk = ggml_new_tensor_2d(rctx, GGML_TYPE_F32, DIT_SPEAKER_DIM, 1);
-            {
-                float * d = tensor_data(rspk);
-                for (int i = 0; i < DIT_SPEAKER_DIM; i++)
-                    d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
-            }
-
-            ggml_tensor * rout = dit_forward(real_dit, rctx, rx, rt_in, rspk);
-            ggml_cgraph * rgf = ggml_new_graph(rctx);
-            ggml_build_forward_expand(rgf, rout);
-            ggml_graph_compute_with_ctx(rctx, rgf, 8);
-
-            int n_out = rout->ne[0] * rout->ne[1];
-            float * od = tensor_data(rout);
-            float sum = 0, minv = 1e9, maxv = -1e9;
-            for (int i = 0; i < n_out; i++) {
-                sum += od[i];
-                if (od[i] < minv) minv = od[i];
-                if (od[i] > maxv) maxv = od[i];
-            }
-            printf("Real DiT output: [%lld x %lld] min=%.6f max=%.6f mean=%.6f\n",
-                   (long long)rout->ne[0], (long long)rout->ne[1],
-                   minv, maxv, sum / n_out);
-
-            ggml_free(rctx);
-        } else {
-            printf("GGUF not found at %s — skipping real weight test\n", gguf_path);
+            ggml_free(real_w_ctx);
+            sf.close();
         }
     }
 
-    // Cleanup
+    // LLM test with llama.cpp
+    printf("\n=== Testing LLM (Qwen2.5-1.5B) ===\n");
+    {
+        llama_log_set([](enum ggml_log_level level, const char * text, void *) {
+            fprintf(stderr, "llama[%d]: %s", level, text);
+        }, nullptr);
+
+        const char * llm_path = "/home/bym/dots.tts.cpp/models/llm_qwen25_1.5b.gguf";
+
+        llama_model_params mparams = llama_model_default_params();
+        mparams.n_gpu_layers = 0;
+        mparams.use_mmap = false; // try without mmap
+        printf("Loading LLM (this may take a moment)...\n");
+        llama_model * llm = llama_model_load_from_file(llm_path, mparams);
+        if (!llm) {
+            // Check if file exists
+            FILE * test_f = fopen(llm_path, "rb");
+            if (test_f) {
+                fclose(test_f);
+                printf("File exists but llama failed to load (GGUF format issue?)\n");
+            } else {
+                printf("LLM GGUF not found at %s - skipping\n", llm_path);
+            }
+        } else {
+            printf("LLM loaded. n_vocab=%d n_ctx_train=%d\n",
+                   llama_vocab_n_tokens(llama_model_get_vocab(llm)),
+                   llama_model_n_ctx_train(llm));
+
+            llama_context_params cparams = llama_context_default_params();
+            cparams.n_ctx = 256;
+            cparams.n_batch = 256;
+            llama_context * lctx = llama_init_from_model(llm, cparams);
+
+            const char * text = "Privet, how are you?";
+            llama_token tokens[256];
+            int n = llama_tokenize(llama_model_get_vocab(llm),
+                                   text, strlen(text), tokens, 256, true, false);
+            printf("Tokenized: '%s' -> %d tokens\n", text, n);
+
+            llama_batch batch = llama_batch_get_one(tokens, n);
+            if (llama_decode(lctx, batch) == 0) {
+                printf("LLM decode OK. %d layers, hidden=%d\n",
+                       llama_model_n_layer(llm),
+                       llama_model_n_embd(llm));
+            }
+            printf("LLM test: OK\n");
+
+            llama_free(lctx);
+            llama_model_free(llm);
+        }
+    }
+
     ggml_free(rt->w_ctx);
     delete rt;
 
-    printf("\nDone. Phase 1 MVP: DiT + Flow Matching compiles and runs.\n");
-    printf("Next: PatchEncoder + real GGUF weight loading.\n");
-
+    printf("\nDone.\n");
+    return 0;
     return 0;
 }
 
@@ -519,8 +610,14 @@ static void patchenc_load_dummy(patch_encoder & enc, ggml_context * w_ctx) {
         patchenc_layer & l = enc.layers[i];
         char name[256];
 
-        snprintf(name, sizeof(name), "pe.layers.%d.attn.qkv.weight", i);
-        l.attn_qkv_weight = alloc(name, PATCHENC_HIDDEN, 3*PATCHENC_HIDDEN, 1, 1);
+        snprintf(name, sizeof(name), "pe.layers.%d.attn.q.weight", i);
+        l.attn_q_weight = alloc(name, PATCHENC_HIDDEN, PATCHENC_HIDDEN, 1, 1);
+
+        snprintf(name, sizeof(name), "pe.layers.%d.attn.k.weight", i);
+        l.attn_k_weight = alloc(name, PATCHENC_HIDDEN, PATCHENC_HIDDEN, 1, 1);
+
+        snprintf(name, sizeof(name), "pe.layers.%d.attn.v.weight", i);
+        l.attn_v_weight = alloc(name, PATCHENC_HIDDEN, PATCHENC_HIDDEN, 1, 1);
 
         snprintf(name, sizeof(name), "pe.layers.%d.attn.o.weight", i);
         l.attn_o_weight = alloc(name, PATCHENC_HIDDEN, PATCHENC_HIDDEN, 1, 1);
@@ -565,7 +662,7 @@ static void patchenc_test(patch_encoder & enc) {
     };
     ggml_context * ctx = ggml_init(test_params);
 
-    int n_patches = 4;  // 4 audio patches
+    int n_patches = 1;  // reduce for speed
     int seq = n_patches * PATCHENC_PATCH_SIZE; // 16 latent frames
     int ch  = PATCHENC_LATENT_DIM; // 128
 

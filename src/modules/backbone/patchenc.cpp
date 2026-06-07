@@ -66,7 +66,9 @@ static void causal_conv1d_stride2(
 static ggml_tensor * enc_attention(
     ggml_context * ctx,
     ggml_tensor * x,           // [hidden, n_tokens]
-    ggml_tensor * qkv_weight,  // [hidden, 3*hidden]
+    ggml_tensor * q_weight,    // [hidden, hidden]
+    ggml_tensor * k_weight,    // [hidden, hidden]
+    ggml_tensor * v_weight,    // [hidden, hidden]
     ggml_tensor * o_weight,    // [hidden, hidden]
     int seq_len,
     int n_batch,
@@ -78,15 +80,11 @@ static ggml_tensor * enc_attention(
     int hidden  = n_heads * head_dim;
     int n_tokens = seq_len * n_batch;
 
-    // QKV projection
-    ggml_tensor * qkv = ggml_mul_mat(ctx, qkv_weight, x); // [3*hidden, n_tokens]
+    // Separate Q, K, V projections
+    ggml_tensor * q = ggml_mul_mat(ctx, q_weight, x); // [hidden, n_tokens]
+    ggml_tensor * k = ggml_mul_mat(ctx, k_weight, x);
+    ggml_tensor *    v = ggml_mul_mat(ctx, v_weight, x);
 
-    // Split into Q, K, V
-    ggml_tensor * q = ggml_view_2d(ctx, qkv, hidden, n_tokens, qkv->nb[1], 0);
-    ggml_tensor * k = ggml_view_2d(ctx, qkv, hidden, n_tokens, qkv->nb[1], hidden * sizeof(float));
-    ggml_tensor * v = ggml_view_2d(ctx, qkv, hidden, n_tokens, qkv->nb[1], 2 * hidden * sizeof(float));
-
-    // Ensure contiguity
     q = ggml_cont(ctx, q);
     k = ggml_cont(ctx, k);
     v = ggml_cont(ctx, v);
@@ -161,7 +159,8 @@ static ggml_tensor * enc_layer_forward(
     if (layer.attn_norm_w) h = ggml_mul(ctx, h, layer.attn_norm_w);
 
     ggml_tensor * attn = enc_attention(ctx, h,
-        layer.attn_qkv_weight, layer.attn_o_weight,
+        layer.attn_q_weight, layer.attn_k_weight, layer.attn_v_weight,
+        layer.attn_o_weight,
         seq_len, n_batch, PATCHENC_NUM_HEADS, PATCHENC_HEAD_SIZE,
         layer.q_norm_w, layer.k_norm_w);
 

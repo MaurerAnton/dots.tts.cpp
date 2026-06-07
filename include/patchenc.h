@@ -12,11 +12,12 @@
 #include <vector>
 
 struct patchenc_layer {
-    // Self-attention
-    ggml_tensor * attn_qkv_weight; // [hidden, 3*hidden]
-    ggml_tensor * attn_qkv_bias;
-    ggml_tensor * attn_o_weight;   // [hidden, hidden]
-    ggml_tensor * attn_o_bias;
+    // Self-attention (separate Q, K, V like real model)
+    ggml_tensor * attn_q_weight; // [hidden, hidden]
+    ggml_tensor * attn_k_weight; // [hidden, hidden]
+    ggml_tensor * attn_v_weight; // [hidden, hidden]
+    ggml_tensor * attn_o_weight; // [hidden, hidden]
+    ggml_tensor * attn_o_bias;   // [hidden]
 
     // qk norms (per-head)
     ggml_tensor * q_norm_w;  // [head_dim]
@@ -25,8 +26,10 @@ struct patchenc_layer {
     // FFN
     ggml_tensor * ffn_w1;  // [hidden, ffn]
     ggml_tensor * ffn_w2;  // [ffn, hidden]
+    ggml_tensor * ffn_b1;  // [ffn]
+    ggml_tensor * ffn_b2;  // [hidden]
 
-    // RMS norms (no adaLN — just standard norms)
+    // RMS norms
     ggml_tensor * attn_norm_w;  // [hidden]
     ggml_tensor * ffn_norm_w;
 };
