@@ -109,6 +109,17 @@ int main(int argc, char ** argv) {
     ggml_context * gctx = ggml_init(gp);
 
     // Project LLM hiddens to DiT space: [1536, n_tok] -> [1024, n_tok]
+    // Normalize LLM hidden states: RMSNorm-style (Qwen uses RMSNorm internally)
+    // Without this, LLM hidden states have different statistics than
+    // Python's PatchEncoder output, causing hidden_proj to produce
+    // out-of-distribution conditioning vectors
+    {
+        float rms = 0;
+        for (int i = 0; i < n_tok * n_embd; i++) rms += hiddens[i] * hiddens[i];
+        rms = sqrtf(rms / (n_tok * n_embd));
+        float scale = 1.0f / (rms + 1e-5f);
+        for (int i = 0; i < n_tok * n_embd; i++) hiddens[i] *= scale;
+    }
     ggml_tensor * ht = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, n_tok);
     memcpy(tensor_data(ht), hiddens, n_tok * n_embd * sizeof(float));
     delete[] hiddens;
@@ -127,7 +138,7 @@ int main(int argc, char ** argv) {
     int nfe = 5; // fewer steps for speed (still reasonable quality)
     float dt = 1.0f / nfe;
 
-    int n_calls = 6; // 6×4=24 frames, 1.0s
+    int n_calls = 4; // 4 valid calls without NaN; 4×4=16 frames, 0.64s
     int frames_per_call = patch_size; // must match z_t size (patch_flat/latent_dim)
     int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
