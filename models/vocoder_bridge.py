@@ -48,11 +48,11 @@ def main():
     z = torch.from_numpy(latents).float().unsqueeze(0).transpose(1,2)  # [1, 128, N]
     
     with torch.no_grad():
-        # pre_proj
-        x = model.pre_proj(z)
-        # dec_mi_layer (SLSTM)
+        # post_proj (Conv1d 128->128, kernel=1)
+        x = model.post_proj(z)
+        # dec_mi_layer: permute, Linear->SLSTM->Linear, permute back
         x = model.dec_mi_layer(x.transpose(1,2)).transpose(1,2)
-        # decoder
+        # decoder (BigVGAN)
         audio = model.decoder(x)
     
     audio_np = audio.squeeze().cpu().numpy()

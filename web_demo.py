@@ -102,7 +102,8 @@ def generate():
         result = subprocess.run(
             [PIPELINE_BIN, text],
             capture_output=True, text=True, timeout=300,
-            cwd=os.path.join(WORKDIR, "build")
+            cwd=os.path.join(WORKDIR, "build"),
+            env={**os.environ, "PYTHONUNBUFFERED": "1"}
         )
         elapsed = time.time() - start
         

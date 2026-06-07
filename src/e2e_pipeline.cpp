@@ -191,6 +191,21 @@ int main(int argc, char ** argv) {
         printf("  Wrote %s: %d samples, %.2f sec\n", wav_path, n_samples, n_samples/(float)VAE_SAMPLE_RATE);
     }
 
+    // Auto-call Python vocoder bridge for real audio
+    printf("\n[6] Real BigVGAN vocoder (Python bridge)...\n");
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+        "/usr/bin/python3.12 ../models/vocoder_bridge.py latents.bin output_real.wav 2>/dev/null");
+    int ret = system(cmd);
+    if (ret == 0) {
+        printf("  Real audio: output_real.wav\n");
+        // Replace output.wav with real audio
+        rename("output_real.wav", "output.wav");
+        printf("  output.wav updated with real BigVGAN audio\n");
+    } else {
+        printf("  Python bridge not available — using simplified vocoder\n");
+    }
+
     delete[] wav; delete[] all_latents;
     ggml_free(gctx); ggml_free(w_ctx);
     printf("\nDone.\n");

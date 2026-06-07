@@ -44,7 +44,7 @@
 // Hop: 960 samples @ 48kHz, SLSTM bottleneck
 
 #define VAE_LATENT_DIM      128
-#define VAE_HOP_SAMPLES     960
+#define VAE_HOP_SAMPLES     1920  // 10*6*4*2*2*2 = 1920 (real vocoder upsampling)
 #define VAE_SAMPLE_RATE     48000
 #define VAE_SLSTM_HIDDEN    512
 #define VAE_SLSTM_LAYERS    4

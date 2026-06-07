@@ -437,38 +437,17 @@ ggml_tensor * dit_forward(
 
     // Add speaker embedding if provided
     if (speaker_emb && model.spk_proj_w1) {
-        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w1, speaker_emb); // [ada_dim, n_batch]
-        fprintf(stderr, "DEBUG: after spk_proj\n"); fflush(stderr);
+        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w1, speaker_emb);
         t_emb = ggml_add(ctx, t_emb, spk);
-        fprintf(stderr, "DEBUG: after ggml_add t_emb+spk\n"); fflush(stderr);
     }
 
-    // SiLU
-    fprintf(stderr, "DEBUG: before silu, t_emb [%lld %lld]\n",
-        (long long)t_emb->ne[0], (long long)t_emb->ne[1]); fflush(stderr);
     ggml_tensor * cond = ggml_silu(ctx, t_emb);
-    fprintf(stderr, "DEBUG: after silu\n"); fflush(stderr);
 
-    // Pass through DiT blocks
     for (int i = 0; i < model.n_layers; i++) {
-        if (i == 0) {
-            fprintf(stderr, "DEBUG layer 0: adaln_w [%lld %lld], cond [%lld %lld %lld %lld], x [%lld %lld %lld %lld]\n",
-                (long long)model.layers[i].adaln_linear_w->ne[0],
-                (long long)model.layers[i].adaln_linear_w->ne[1],
-                (long long)cond->ne[0], (long long)cond->ne[1],
-                (long long)cond->ne[2], (long long)cond->ne[3],
-                (long long)x->ne[0], (long long)x->ne[1],
-                (long long)x->ne[2], (long long)x->ne[3]);
-        }
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
     }
 
-    // Output projection: [hidden, n_tokens] -> [latent_dim, n_tokens]
-    fprintf(stderr, "DEBUG: out_proj_w [%lld %lld], x [%lld %lld]\n",
-        (long long)model.out_proj_w->ne[0], (long long)model.out_proj_w->ne[1],
-        (long long)x->ne[0], (long long)x->ne[1]);
-    fflush(stderr);
-    ggml_tensor * out = ggml_mul_mat(ctx, model.out_proj_w, x); // [latent_dim, n_tokens]
+    ggml_tensor * out = ggml_mul_mat(ctx, model.out_proj_w, x);
 
     return out; // [latent_dim, n_tokens] = [VAE_LATENT_DIM, seq_len * n_batch]
 }
