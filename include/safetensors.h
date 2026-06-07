@@ -35,6 +35,9 @@ public:
     // Load and create a new ggml tensor
     ggml_tensor * load_tensor(ggml_context * ctx, const st_tensor_info & info);
 
+    // Load tensor data into raw float buffer (for BigVGAN C++ decoder)
+    bool load_raw(const st_tensor_info & info, float * dst, size_t max_elems);
+
 private:
     FILE * fp_ = nullptr;
     std::vector<st_tensor_info> tensors_;

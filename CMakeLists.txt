@@ -23,6 +23,7 @@ set(DOTS_TTS_SOURCES
     src/modules/backbone/flow_matching.cpp
     src/modules/backbone/patchenc.cpp
     src/modules/vocoder/audiovae.cpp
+    src/modules/vocoder/bigvgan_cpp.cpp
     src/utils/safetensors.cpp
     src/utils/dit_loader.cpp
     src/utils/patchenc_loader.cpp
@@ -57,6 +58,7 @@ add_executable(e2e_pipeline
     src/modules/backbone/dit_forward.cpp
     src/modules/backbone/patchenc.cpp
     src/modules/vocoder/audiovae.cpp
+    src/modules/vocoder/bigvgan_cpp.cpp
     src/utils/safetensors.cpp
     src/utils/dit_loader.cpp
     src/utils/patchenc_loader.cpp

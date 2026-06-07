@@ -224,20 +224,29 @@ bool SafeTensorsFile::load_tensor(const st_tensor_info & info, ggml_tensor * dst
 
 ggml_tensor * SafeTensorsFile::load_tensor(ggml_context * ctx, const st_tensor_info & info) {
     if (!fp_) return nullptr;
-
-    // Create ggml tensor with matching shape
     int n_dims = info.shape.size();
     int64_t ne[4] = {1, 1, 1, 1};
-    for (int i = 0; i < n_dims && i < 4; i++) {
-        ne[i] = info.shape[n_dims - 1 - i]; // Reverse: safetensors is row-major, ggml is column-major
-    }
-
-    ggml_tensor * t = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,
-        ne[0], ne[1], ne[2], ne[3]);
-
-    if (!load_tensor(info, t)) {
-        return nullptr;
-    }
-
+    for (int i = 0; i < n_dims && i < 4; i++)
+        ne[i] = info.shape[n_dims - 1 - i];
+    ggml_tensor * t = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2], ne[3]);
+    if (!load_tensor(info, t)) return nullptr;
     return t;
+}
+
+bool SafeTensorsFile::load_raw(const st_tensor_info & info, float * dst, size_t max_elems) {
+    if (!fp_) return false;
+    size_t expected = 1;
+    for (auto d : info.shape) expected *= d;
+    if (expected > max_elems) return false;
+    uint64_t offset = data_start_ + info.data_offset;
+    if (fseeko(fp_, (off_t)offset, SEEK_SET) != 0) return false;
+    if (info.dtype == "F32") {
+        fread(dst, sizeof(float), expected, fp_);
+    } else if (info.dtype == "F16") {
+        uint16_t * buf16 = new uint16_t[expected];
+        fread(buf16, sizeof(uint16_t), expected, fp_);
+        for (size_t i = 0; i < expected; i++) dst[i] = ggml_fp16_to_fp32(buf16[i]);
+        delete[] buf16;
+    }
+    return true;
 }

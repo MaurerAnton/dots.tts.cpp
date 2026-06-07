@@ -4,6 +4,7 @@
 #include "dots_tts.h"
 #include "dit.h"
 #include "audiovae.h"
+#include "bigvgan_cpp.h"
 #include "safetensors.h"
 #include "llama.h"
 #include "ggml.h"
@@ -192,18 +193,44 @@ int main(int argc, char ** argv) {
     }
 
     // Auto-call Python vocoder bridge for real audio
-    printf("\n[6] Real BigVGAN vocoder (Python bridge)...\n");
+    printf("\n[6] Real BigVGAN vocoder...\n");
+    
+    // Try Python bridge first (proven, real audio)
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
         "/usr/bin/python3.12 ../models/vocoder_bridge.py latents.bin output_real.wav 2>/dev/null");
     int ret = system(cmd);
     if (ret == 0) {
-        printf("  Real audio: output_real.wav\n");
-        // Replace output.wav with real audio
         rename("output_real.wav", "output.wav");
-        printf("  output.wav updated with real BigVGAN audio\n");
+        printf("  output.wav: real BigVGAN audio (Python bridge)\n");
     } else {
-        printf("  Python bridge not available — using simplified vocoder\n");
+        // Fallback: experimental C++ BigVGAN
+        BigVGANDecoder bigvgan;
+        const char * vp = "/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-base/snapshots/6050dd598c4161d18703bb2a34ecb5588da7804e/vocoder.safetensors";
+        if (bigvgan_load(vp, bigvgan)) {
+            printf("  C++ BigVGAN (experimental)...\n");
+            int real_samples;
+            float * real_wav = new float[n_frames * VAE_HOP_SAMPLES];
+            bigvgan_decode(bigvgan, all_latents, n_frames, real_wav, &real_samples);
+            wf = fopen("output.wav", "wb");
+            if (wf) {
+                int ds = real_samples * 2, fs = 36 + ds;
+                fwrite("RIFF",1,4,wf); fwrite(&fs,4,1,wf); fwrite("WAVE",1,4,wf);
+                fwrite("fmt ",1,4,wf); int fz=16; fwrite(&fz,4,1,wf);
+                short af=1; fwrite(&af,2,1,wf); short nc=1; fwrite(&nc,2,1,wf);
+                int sr=VAE_SAMPLE_RATE; fwrite(&sr,4,1,wf);
+                int br=sr*2; fwrite(&br,4,1,wf); short ba=2; fwrite(&ba,2,1,wf); short bp=16; fwrite(&bp,2,1,wf);
+                fwrite("data",1,4,wf); fwrite(&ds,4,1,wf);
+                for (int i=0;i<real_samples;i++) {
+                    float s=real_wav[i]*32767.0f;
+                    if(s>32767)s=32767; if(s<-32768)s=-32768;
+                    short si=(short)s; fwrite(&si,2,1,wf);
+                }
+                fclose(wf);
+                printf("  output.wav: C++ BigVGAN (%d samples)\n", real_samples);
+            }
+            delete[] real_wav; bigvgan_free(bigvgan);
+        }
     }
 
     delete[] wav; delete[] all_latents;
