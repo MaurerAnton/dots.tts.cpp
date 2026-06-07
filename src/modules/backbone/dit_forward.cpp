@@ -432,21 +432,36 @@ ggml_tensor * dit_forward(
     x = ggml_cont(ctx, ggml_permute(ctx, x, 2, 0, 1, 3)); // [hidden, seq_len, n_batch]
     x = ggml_reshape_2d(ctx, x, hidden, n_tokens);
 
-    // Timestep embedding
-    ggml_tensor * t_emb = dit_timestep_embedding(ctx, t, DIT_ADA_DIM); // [ada_dim, n_batch]
-
-    // Add speaker embedding if provided
+    // Timestep embedding: sinusoidal -> MLP (real dots.tts pipeline)
+    // Step 1: sinusoidal features [256, n_batch]
+    ggml_tensor * t_sin = dit_timestep_embedding(ctx, t, 256);
+    
+    // Step 2: time_embedder MLP: 256 -> 1024 -> 1024
+    ggml_tensor * t_mlp = ggml_mul_mat(ctx, model.t_embed_w1, t_sin); // [1024, n_batch]
+    t_mlp = ggml_silu(ctx, t_mlp);
+    t_mlp = ggml_mul_mat(ctx, model.t_embed_w2, t_mlp); // [1024, n_batch]
+    
+    // Step 3: speaker embedding via xvec_proj (2-layer MLP)
+    ggml_tensor * cond = t_mlp;
     if (speaker_emb && model.spk_proj_w1) {
-        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w1, speaker_emb);
-        t_emb = ggml_add(ctx, t_emb, spk);
+        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w1, speaker_emb); // [1024, n_batch]
+        spk = ggml_silu(ctx, spk);
+        cond = ggml_add(ctx, cond, spk);
     }
+    
+    // Step 4: SiLU on combined conditioning
+    cond = ggml_silu(ctx, cond);
 
-    ggml_tensor * cond = ggml_silu(ctx, t_emb);
+    // Input layer (norm + linear before DiT blocks)
+    if (model.input_layer_w) {
+        x = ggml_mul_mat(ctx, model.input_layer_w, x);
+    }
 
     for (int i = 0; i < model.n_layers; i++) {
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
     }
 
+    // Output projection
     ggml_tensor * out = ggml_mul_mat(ctx, model.out_proj_w, x);
 
     return out; // [latent_dim, n_tokens] = [VAE_LATENT_DIM, seq_len * n_batch]
