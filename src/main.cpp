@@ -14,6 +14,7 @@
 #include "audiovae.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "gguf.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@
 // Forward declarations
 static void patchenc_load_dummy(patch_encoder & enc, ggml_context * w_ctx);
 static void patchenc_test(patch_encoder & enc);
+bool dots_tts_load_gguf(const char * fname, ggml_context * w_ctx, dit_model & dit, patch_encoder & enc);
 
 struct dots_tts_runtime {
     dit_model dit;
@@ -96,11 +98,14 @@ static void dots_tts_load_dummy(dots_tts_runtime * rt) {
         char name[256];
         dit_block & b = m.layers[i];
 
-        snprintf(name, sizeof(name), "dit.layers.%d.attn.qkv.weight", i);
-        b.attn_qkv_weight = alloc_tensor(name, DIT_HIDDEN_SIZE, 3 * DIT_HIDDEN_SIZE, 1, 1);
+        snprintf(name, sizeof(name), "dit.layers.%d.attn.q.weight", i);
+        b.attn_q_weight = alloc_tensor(name, DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE, 1, 1);
 
-        snprintf(name, sizeof(name), "dit.layers.%d.attn.qkv.bias", i);
-        b.attn_qkv_bias = alloc_tensor(name, 3 * DIT_HIDDEN_SIZE, 1, 1, 1);
+        snprintf(name, sizeof(name), "dit.layers.%d.attn.k.weight", i);
+        b.attn_k_weight = alloc_tensor(name, DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE, 1, 1);
+
+        snprintf(name, sizeof(name), "dit.layers.%d.attn.v.weight", i);
+        b.attn_v_weight = alloc_tensor(name, DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE, 1, 1);
 
         snprintf(name, sizeof(name), "dit.layers.%d.attn.o.weight", i);
         b.attn_o_weight = alloc_tensor(name, DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE, 1, 1);
@@ -133,8 +138,13 @@ static void dots_tts_load_dummy(dots_tts_runtime * rt) {
         b.ffn_norm_w = alloc_tensor(name, DIT_HIDDEN_SIZE, 1, 1, 1);
     }
 
-    m.spk_proj_w  = alloc_tensor("dit.spk_proj.weight", DIT_SPEAKER_DIM, DIT_ADA_DIM, 1, 1);
-    m.out_proj_w  = alloc_tensor("dit.out_proj.weight", DIT_HIDDEN_SIZE, VAE_LATENT_DIM, 1, 1);
+    m.spk_proj_w1  = alloc_tensor("dit.spk_proj.w1.weight", DIT_SPEAKER_DIM, DIT_ADA_DIM, 1, 1);
+    m.spk_proj_b1  = alloc_tensor("dit.spk_proj.w1.bias",   DIT_ADA_DIM, 1, 1, 1);
+    m.t_embed_w1   = alloc_tensor("dit.t_embed.w1.weight", DIT_ADA_DIM, 256, 1, 1);
+    m.t_embed_b1   = alloc_tensor("dit.t_embed.w1.bias",   DIT_ADA_DIM, 1, 1, 1);
+    m.t_embed_w2   = alloc_tensor("dit.t_embed.w2.weight", DIT_ADA_DIM, DIT_ADA_DIM, 1, 1);
+    m.t_embed_b2   = alloc_tensor("dit.t_embed.w2.bias",   DIT_ADA_DIM, 1, 1, 1);
+    m.out_proj_w   = alloc_tensor("dit.out_proj.weight",  DIT_HIDDEN_SIZE, VAE_LATENT_DIM, 1, 1);
     m.out_proj_b  = alloc_tensor("dit.out_proj.bias",    VAE_LATENT_DIM, 1, 1, 1);
 
     printf("Dummy DiT weights loaded: %zu bytes\n", ggml_used_mem(rt->w_ctx));
@@ -410,6 +420,65 @@ int main(int argc, char ** argv) {
     }
 
     printf("\n=== All Phase 1 tests passed ===\n");
+
+    // Real GGUF weights test
+    printf("\n=== Testing DiT with real GGUF weights ===\n");
+    {
+        const char * gguf_path = "../models/dots_tts_f16.gguf";
+        dit_model real_dit;
+        patch_encoder real_enc;
+
+        if (dots_tts_load_gguf(gguf_path, rt->w_ctx, real_dit, real_enc)) {
+            printf("GGUF loaded. Running DiT forward with real weights...\n");
+
+            struct ggml_init_params real_params = {
+                .mem_size   = 256ULL * 1024 * 1024,
+                .mem_buffer = nullptr,
+                .no_alloc   = false,
+            };
+            ggml_context * rctx = ggml_init(real_params);
+
+            int seq_len = 32;
+            ggml_tensor * rx = ggml_new_tensor_3d(rctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, seq_len);
+            {
+                float * d = tensor_data(rx);
+                for (int i = 0; i < seq_len * DIT_HIDDEN_SIZE; i++)
+                    d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+            }
+            rx = ggml_cont(rctx, ggml_permute(rctx, rx, 2, 1, 0, 3));
+
+            ggml_tensor * rt_in = ggml_new_tensor_1d(rctx, GGML_TYPE_F32, 1);
+            ((float*)rt_in->data)[0] = 0.5f;
+
+            ggml_tensor * rspk = ggml_new_tensor_2d(rctx, GGML_TYPE_F32, DIT_SPEAKER_DIM, 1);
+            {
+                float * d = tensor_data(rspk);
+                for (int i = 0; i < DIT_SPEAKER_DIM; i++)
+                    d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+            }
+
+            ggml_tensor * rout = dit_forward(real_dit, rctx, rx, rt_in, rspk);
+            ggml_cgraph * rgf = ggml_new_graph(rctx);
+            ggml_build_forward_expand(rgf, rout);
+            ggml_graph_compute_with_ctx(rctx, rgf, 8);
+
+            int n_out = rout->ne[0] * rout->ne[1];
+            float * od = tensor_data(rout);
+            float sum = 0, minv = 1e9, maxv = -1e9;
+            for (int i = 0; i < n_out; i++) {
+                sum += od[i];
+                if (od[i] < minv) minv = od[i];
+                if (od[i] > maxv) maxv = od[i];
+            }
+            printf("Real DiT output: [%lld x %lld] min=%.6f max=%.6f mean=%.6f\n",
+                   (long long)rout->ne[0], (long long)rout->ne[1],
+                   minv, maxv, sum / n_out);
+
+            ggml_free(rctx);
+        } else {
+            printf("GGUF not found at %s — skipping real weight test\n", gguf_path);
+        }
+    }
 
     // Cleanup
     ggml_free(rt->w_ctx);

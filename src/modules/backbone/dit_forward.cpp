@@ -63,7 +63,10 @@ static ggml_tensor * dit_ffn(
 static ggml_tensor * dit_attention(
     ggml_context * ctx,
     ggml_tensor * x,           // [hidden, seq_len * n_batch]
-    ggml_tensor * qkv_weight,  // [3*hidden, hidden]
+    ggml_tensor * qkv_weight,  // [3*hidden, hidden] (merged) or nullptr
+    ggml_tensor * q_weight,     // [hidden, hidden] (separate)
+    ggml_tensor * k_weight,     // [hidden, hidden]
+    ggml_tensor * v_weight,     // [hidden, hidden]
     ggml_tensor * o_weight,    // [hidden, hidden]
     int seq_len,
     int n_batch,
@@ -75,19 +78,29 @@ static ggml_tensor * dit_attention(
     int hidden  = n_heads * head_dim;
     int n_tokens = seq_len * n_batch;
 
-    // QKV projection: [3*hidden, n_tokens]
-    ggml_tensor * qkv = ggml_mul_mat(ctx, qkv_weight, x);
+    // QKV projection: separate or merged
+    ggml_tensor * q, * k, * v;
+    if (qkv_weight) {
+        // Merged QKV: [3*hidden, n_tokens]
+        ggml_tensor * qkv = ggml_mul_mat(ctx, qkv_weight, x);
+        q = ggml_view_2d(ctx, qkv, hidden, n_tokens, qkv->nb[1], 0);
+        k = ggml_view_2d(ctx, qkv, hidden, n_tokens, qkv->nb[1], hidden * sizeof(float));
+        v = ggml_view_2d(ctx, qkv, hidden, n_tokens, qkv->nb[1], 2 * hidden * sizeof(float));
+    } else {
+        // Separate Q, K, V: each [hidden, n_tokens]
+        q = ggml_mul_mat(ctx, q_weight, x);
+        k = ggml_mul_mat(ctx, k_weight, x);
+        v = ggml_mul_mat(ctx, v_weight, x);
+    }
 
-    // Split: Q, K, V each [hidden, n_tokens]
-    int h = hidden;
-    ggml_tensor * q = ggml_view_2d(ctx, qkv, h, n_tokens, qkv->nb[1], 0);
-    ggml_tensor * k = ggml_view_2d(ctx, qkv, h, n_tokens, qkv->nb[1], h * sizeof(float));
-    ggml_tensor * v = ggml_view_2d(ctx, qkv, h, n_tokens, qkv->nb[1], 2 * h * sizeof(float));
+    // Ensure contiguity
+    q = ggml_cont(ctx, q);
+    k = ggml_cont(ctx, k);
+    v = ggml_cont(ctx, v);
 
-    // Reshape to [seq_len, n_batch, n_heads, head_dim] for RoPE
-    // First: [head_dim, n_heads, seq_len, n_batch]
+    // Reshape for RoPE (4D then flatten)
     auto reshape_qkv_4d = [&](ggml_tensor * t) {
-        t = ggml_cont(ctx, t);  // ensure contiguity after view
+        t = ggml_cont(ctx, t);
         ggml_tensor * t4 = ggml_reshape_4d(ctx, t, head_dim, n_heads, seq_len, n_batch);
         // permute to [seq_len, n_heads, head_dim, n_batch]
         t4 = ggml_cont(ctx, ggml_permute(ctx, t4, 2, 0, 1, 3));
@@ -372,9 +385,11 @@ static ggml_tensor * dit_block_forward_simple(
 
     // Attention
     ggml_tensor * attn = dit_attention(ctx, h,
-        block.attn_qkv_weight, block.attn_o_weight,
+        nullptr, // qkv_weight (merged) — use separate below
+        block.attn_q_weight, block.attn_k_weight, block.attn_v_weight,
+        block.attn_o_weight,
         seq_len, n_batch, DIT_NUM_HEADS, DIT_HEAD_SIZE,
-        nullptr, nullptr);
+        block.q_norm_w, block.k_norm_w);
 
     x = ggml_add(ctx, x, ggml_mul(ctx, gate_msa_tok, attn));
 
@@ -421,8 +436,8 @@ ggml_tensor * dit_forward(
     ggml_tensor * t_emb = dit_timestep_embedding(ctx, t, DIT_ADA_DIM); // [ada_dim, n_batch]
 
     // Add speaker embedding if provided
-    if (speaker_emb && model.spk_proj_w) {
-        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w, speaker_emb); // [ada_dim, n_batch]
+    if (speaker_emb && model.spk_proj_w1) {
+        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w1, speaker_emb); // [ada_dim, n_batch]
         fprintf(stderr, "DEBUG: after spk_proj\n"); fflush(stderr);
         t_emb = ggml_add(ctx, t_emb, spk);
         fprintf(stderr, "DEBUG: after ggml_add t_emb+spk\n"); fflush(stderr);

@@ -42,19 +42,22 @@ struct dit_layer {
 };
 
 struct dit_block {
-    // attention weights
-    ggml_tensor * attn_qkv_weight; // [hidden, 3*hidden]
-    ggml_tensor * attn_qkv_bias;
-    ggml_tensor * attn_o_weight;   // [hidden, hidden]
-    ggml_tensor * attn_o_bias;
+    // attention weights (separate Q, K, V — real model doesn't merge)
+    ggml_tensor * attn_q_weight; // [hidden, hidden]
+    ggml_tensor * attn_k_weight; // [hidden, hidden]
+    ggml_tensor * attn_v_weight; // [hidden, hidden]
+    ggml_tensor * attn_o_weight; // [hidden, hidden]
+    ggml_tensor * attn_o_bias;   // [hidden]
 
     // qk norms (per-head)
     ggml_tensor * q_norm_w;  // [head_dim]
     ggml_tensor * k_norm_w;  // [head_dim]
 
     // ffn
-    ggml_tensor * ffn_w1;  // [hidden, ffn]  first linear
-    ggml_tensor * ffn_w2;  // [ffn, hidden]  second linear
+    ggml_tensor * ffn_w1;   // [hidden, ffn]  or [ffn, hidden] (PyTorch convention)
+    ggml_tensor * ffn_w2;   // [ffn, hidden]  or [hidden, ffn]
+    ggml_tensor * ffn_b1;   // [ffn]
+    ggml_tensor * ffn_b2;   // [hidden]
 
     // adaLN modulation: Linear(ada_dim -> 6*hidden)
     ggml_tensor * adaln_linear_w;  // [ada_dim, 6*hidden]
@@ -76,20 +79,35 @@ struct dit_model {
 
     std::vector<dit_block> layers;
 
-    // input projections
-    ggml_tensor * cond_in_proj;   // [cond_hidden -> hidden]
-    ggml_tensor * noise_in_proj;  // [latent_dim -> hidden]
+    // input projections (from LLM hiddens / latents / coordinates -> DiT hidden)
+    ggml_tensor * hidden_proj_w;   // [hidden_size, 1536] — project LLM hidden to DiT
+    ggml_tensor * hidden_proj_b;
+    ggml_tensor * latent_proj_w;   // [hidden_size, 128] — project VAE latent to DiT
+    ggml_tensor * latent_proj_b;
+    ggml_tensor * coord_proj_w;    // [hidden_size, 128] — project coordinates to DiT
+    ggml_tensor * coord_proj_b;
 
-    // timestep embedding
-    ggml_tensor * t_embed_w1;  // [freq_dim, ada_dim]
-    ggml_tensor * t_embed_w2;  // [ada_dim, ada_dim]
+    // input layer (norm + linear before DiT blocks)
+    ggml_tensor * input_layer_w;   // [hidden_size, hidden_size]
+    ggml_tensor * input_layer_b;
 
-    // speaker projection
-    ggml_tensor * spk_proj_w;  // [speaker_dim, ada_dim]
+    // timestep embedding MLP (sinusoidal -> 256 -> 1024 -> 1024)
+    ggml_tensor * t_embed_w1;  // [256, 1024]? Actually [1024, 256] (PyTorch)
+    ggml_tensor * t_embed_b1;  // [1024]
+    ggml_tensor * t_embed_w2;  // [1024, 1024]
+    ggml_tensor * t_embed_b2;  // [1024]
 
-    // final output projection
-    ggml_tensor * out_proj_w;  // [hidden, latent_dim]
-    ggml_tensor * out_proj_b;  // [latent_dim]
+    // speaker projection (2-layer MLP)
+    ggml_tensor * spk_proj_w1;  // [speaker_dim=512, ada_dim=1024]
+    ggml_tensor * spk_proj_b1;
+    ggml_tensor * spk_proj_w2;  // [ada_dim=1024]
+    ggml_tensor * spk_proj_b2;
+
+    // output layer (adaLN norm + linear -> latent_dim)
+    ggml_tensor * out_adaln_w;  // [2*hidden_size, ada_dim] — output adaLN
+    ggml_tensor * out_adaln_b;
+    ggml_tensor * out_proj_w;   // [latent_dim=128, hidden_size]
+    ggml_tensor * out_proj_b;
 
     // compute buffer (KV cache for self-attn, etc.)
     ggml_context * ctx = nullptr;
