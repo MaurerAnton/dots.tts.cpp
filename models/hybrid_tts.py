@@ -15,7 +15,7 @@ def generate(text, output="output.wav"):
     ckpt = hf_hub_download('rednote-hilab/dots.tts-soar', 'model.safetensors')
     state = safetensors.torch.load_file(ckpt)
     
-    with open('/tmp/dots_tts_py/configs/dots_tts.yaml') as f:
+    with open('/tmp/dots_tts_py/configs/dots_tts_fixed.yaml') as f:
         cfg = OmegaConf.create(f.read())
     
     model = DotsTtsModel(cfg)

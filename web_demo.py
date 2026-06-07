@@ -94,11 +94,14 @@ def generate():
     
     start = time.time()
     try:
-        # Use hybrid Python TTS for guaranteed quality
+        # Use dots.tts CLI for guaranteed quality
         result = subprocess.run(
-            ["/usr/bin/python3.12", os.path.join(WORKDIR, "models", "hybrid_tts.py"),
-             text, os.path.join(WORKDIR, "build", "output.wav")],
-            capture_output=True, text=True, timeout=300,
+            ["/usr/bin/python3.12", "-m", "dots_tts.cli",
+             "--model-name-or-path", "rednote-hilab/dots.tts-soar",
+             "--text", text,
+             "--output", os.path.join(WORKDIR, "build", "output.wav"),
+             "--precision", "float32"],
+            capture_output=True, text=True, timeout=600,
             cwd=WORKDIR
         )
         elapsed = time.time() - start
