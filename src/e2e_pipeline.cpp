@@ -127,14 +127,21 @@ int main(int argc, char ** argv) {
     int nfe = 10; // ODE steps per patch
     float dt = 1.0f / nfe;
 
-    int n_calls = 4;
-    int n_frames_total = n_calls * patch_size;
+    int n_calls = 8;  // 8 calls x 2 good frames = 16 total
+    int frames_per_call = 2;
+    int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
     float * z_t = new float[patch_flat];
     float * v_t = new float[patch_flat];
+    int total_frames = 0;
     
     float * cond_llm_data = new float[DIT_HIDDEN_SIZE * n_tok];
     memcpy(cond_llm_data, tensor_data(cond_llm), DIT_HIDDEN_SIZE * n_tok * sizeof(float));
+
+    // History buffer for autoregressive latent_proj
+    int max_history = n_frames_total;
+    float * history_latents = new float[max_history * latent_dim];
+    int history_len = 0;
 
     for (int call = 0; call < n_calls; call++) {
         printf("  Call %d/%d: ", call+1, n_calls);
@@ -146,7 +153,7 @@ int main(int argc, char ** argv) {
             float t = (float)step * dt;
 
             // Build proper DiT FM conditioning buffer
-            // Structure: hidden_proj(text) + latent_proj(noise) + coord_proj(all)
+            // hidden_proj(text) + latent_proj(history) + noise at end
             int cond_seq = 32;
             ggml_reset(gctx);
             ggml_tensor * dx = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
@@ -154,53 +161,43 @@ int main(int argc, char ** argv) {
                 float * dd = tensor_data(dx);
                 memset(dd, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
                 
-                // hidden_proj at text positions
+                // hidden_proj at text positions (start of sequence)
                 if (n_tok > 0)
                     memcpy(dd, cond_llm_data, n_tok * DIT_HIDDEN_SIZE * sizeof(float));
                 
-                // latent_proj at noise positions (project noise through latent_proj)
-                int noise_start = cond_seq - patch_size;
-                for (int i = 0; i < patch_size; i++) {
-                    // Manual latent_proj: linear 128->1024
-                    float noise_vec[128];
-                    memcpy(noise_vec, z_t + i * latent_dim, latent_dim * sizeof(float));
-                    float * out_pos = dd + (noise_start + i) * DIT_HIDDEN_SIZE;
-                    if (dit.latent_proj_w) {
-                        // Weight: [out=1024, in=128] in safetensors -> ggml ne[0]=128, ne[1]=1024
-                        // out[j] = sum_k noise[k] * w[j * 128 + k]
-                        float * w = tensor_data(dit.latent_proj_w); // [128, 1024] in ggml
+                // latent_proj of history latents (after text)
+                int hist_pos = n_tok;
+                if (dit.latent_proj_w && history_len > 0) {
+                    float * lw = tensor_data(dit.latent_proj_w); // [128, 1024] in ggml
+                    for (int h = 0; h < history_len && hist_pos + h < cond_seq - patch_size; h++) {
+                        float * out_pos = dd + (hist_pos + h) * DIT_HIDDEN_SIZE;
+                        float * hist_vec = history_latents + h * latent_dim;
                         for (int j = 0; j < DIT_HIDDEN_SIZE; j++) {
                             float s = 0;
                             for (int k = 0; k < latent_dim; k++)
-                                s += noise_vec[k] * w[k * 1024 + j];
-                            out_pos[j] = s;
+                                s += hist_vec[k] * lw[k * 1024 + j];
+                            out_pos[j] += s;
                         }
-                    } else {
-                        // Zero-pad if no latent_proj
-                        for (int j = 0; j < latent_dim && j < DIT_HIDDEN_SIZE; j++)
-                            out_pos[j] = noise_vec[j];
                     }
                 }
                 
-                // coord_proj at all positions (sinusoidal coordinate embedding)
-                if (dit.coord_proj_w) {
-                    float * cw = tensor_data(dit.coord_proj_w); // [128, 1024] in ggml
-                    for (int pos = 0; pos < cond_seq; pos++) {
-                        float * out_pos = dd + pos * DIT_HIDDEN_SIZE;
-                        // coord = sinusoidal(pos, 128)
-                        float coord[128];
-                        for (int d = 0; d < 64; d++) {
-                            float freq = powf(10000.0f, -2.0f * d / 128.0f);
-                            coord[2*d] = sinf((float)pos * freq);
-                            coord[2*d+1] = cosf((float)pos * freq);
-                        }
-                        // Project coord through coord_proj
+                // Coordinate projection of noise (at last patch_size positions)
+                int noise_start = cond_seq - patch_size;
+                for (int i = 0; i < patch_size; i++) {
+                    float * out_pos = dd + (noise_start + i) * DIT_HIDDEN_SIZE;
+                    // coord = z_t projected through coord_proj
+                    if (dit.coord_proj_w) {
+                        float * cw = tensor_data(dit.coord_proj_w); // [128, 1024]
+                        float * noise_vec = z_t + i * latent_dim;
                         for (int j = 0; j < DIT_HIDDEN_SIZE; j++) {
                             float s = 0;
-                            for (int k = 0; k < 128; k++)
-                                s += coord[k] * cw[k * 1024 + j];
-                            out_pos[j] += s; // ADD to existing conditioning
+                            for (int k = 0; k < latent_dim; k++)
+                                s += noise_vec[k] * cw[k * 1024 + j]; // coord_proj(noise)
+                            out_pos[j] += s;
                         }
+                    } else {
+                        for (int j = 0; j < latent_dim && j < DIT_HIDDEN_SIZE; j++)
+                            out_pos[j] += z_t[i * latent_dim + j];
                     }
                 }
             }
@@ -228,7 +225,12 @@ int main(int argc, char ** argv) {
         // Store generated latent (scale to match VAE prior ~N(0,1))
         float scale = 0.45f; // RMS 2.2 -> 1.0 (VAE prior)
         for (int i = 0; i < patch_flat; i++) z_t[i] *= scale;
-        memcpy(all_latents + call * patch_flat, z_t, patch_flat * sizeof(float));
+        memcpy(all_latents + total_frames * latent_dim, z_t, 2 * latent_dim * sizeof(float));
+        // Store first 2 frames in history
+        memcpy(history_latents + history_len * latent_dim, z_t, 2 * latent_dim * sizeof(float));
+        history_len += 2;
+        total_frames += 2;
+        
         float ms = 0;
         for (int i = 0; i < patch_flat; i++) ms += z_t[i] * z_t[i];
         printf("rms=%.4f\n", sqrtf(ms / patch_flat));
@@ -237,9 +239,10 @@ int main(int argc, char ** argv) {
     delete[] cond_llm_data;
     delete[] z_t;
     delete[] v_t;
+    delete[] history_latents;
 
     // VAE per-channel normalization
-    for (int f = 0; f < n_frames_total; f++)
+    for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++)
             all_latents[f * VAE_LATENT_DIM + c] =
                 (all_latents[f * VAE_LATENT_DIM + c] - VAE_MEAN[c]) / VAE_STD[c];
@@ -247,13 +250,11 @@ int main(int argc, char ** argv) {
     // Export latents for Python vocoder verification
     FILE * lf = fopen("latents.bin", "wb");
     if (lf) {
-        fwrite(all_latents, sizeof(float), n_frames_total * latent_dim, lf);
+        fwrite(all_latents, sizeof(float), total_frames * latent_dim, lf);
         fclose(lf);
-        printf("  Latents exported to latents.bin (%d floats)\n", n_frames_total * latent_dim);
-    }
+        printf("  Latents exported to latents.bin (%d floats)\n", total_frames * latent_dim);
 
-    int n_frames = n_frames_total;
-    // === Phase 5: AudioVAE + WAV ===
+    int n_frames = total_frames;
     printf("[5] AudioVAE + WAV...\n");
     int n_samples;
     float * wav = new float[n_frames * VAE_HOP_SAMPLES];
