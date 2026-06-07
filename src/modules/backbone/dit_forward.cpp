@@ -452,8 +452,16 @@ ggml_tensor * dit_forward(
     // Step 4: SiLU on combined conditioning
     cond = ggml_silu(ctx, cond);
 
-    // Input layer (norm + linear before DiT blocks)
+    // Input layer (Linear + bias before DiT blocks)
     if (model.input_layer_w) {
+        // Apply bias manually (ggml doesn't broadcast)
+        if (model.input_layer_b) {
+            float * xd = tensor_data(x);
+            float * bd = tensor_data(model.input_layer_b);
+            for (int i = 0; i < n_tokens; i++)
+                for (int j = 0; j < hidden; j++)
+                    xd[i * hidden + j] += bd[j];
+        }
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
     }
 
@@ -498,6 +506,16 @@ ggml_tensor * dit_forward(
         ggml_tensor * scale_1 = ggml_add(ctx, ones, scale_tok);
         out = ggml_mul(ctx, out, scale_1);
         out = ggml_add(ctx, out, shift_tok);
+    }
+    // Output linear with bias
+    if (model.out_proj_b) {
+        int n_out = model.out_proj_w->ne[1];
+        int nt = seq_len * n_batch;
+        float * od = tensor_data(out);
+        float * bd = tensor_data(model.out_proj_b);
+        for (int i = 0; i < nt; i++)
+            for (int j = 0; j < n_out; j++)
+                od[i * n_out + j] += bd[j];
     }
     out = ggml_mul_mat(ctx, model.out_proj_w, out);
 

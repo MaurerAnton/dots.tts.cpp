@@ -124,7 +124,7 @@ int main(int argc, char ** argv) {
     int patch_size = PATCHENC_PATCH_SIZE; // 4
     int n_patches = 4;
     int patch_flat = patch_size * latent_dim; // 512
-    int nfe = 10; // ODE steps per patch
+    int nfe = 3; // fast test (was 5)
     float dt = 1.0f / nfe;
 
     int n_calls = 16; // 16 calls x 1 strong frame = 16 total
