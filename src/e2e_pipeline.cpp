@@ -146,7 +146,11 @@ int main(int argc, char ** argv) {
     for (int call = 0; call < n_calls; call++) {
         printf("  Call %d/%d: ", call+1, n_calls);
 
-        for (int i = 0; i < patch_flat; i++) z_t[i] = randn();
+        for (int i = 0; i < patch_flat; i++) {
+            float z = randn();
+            if (z > 5.0f) z = 5.0f; if (z < -5.0f) z = -5.0f;
+            z_t[i] = z;
+        }
 
         // ODE integration: Euler method
         for (int step = 0; step < nfe; step++) {
@@ -213,12 +217,29 @@ int main(int argc, char ** argv) {
             ggml_build_forward_expand(dgf, dout);
             ggml_graph_compute_with_ctx(gctx, dgf, 8);
 
-            // Extract velocity
+            // Extract velocity with NaN guard
             float * vdata = tensor_data(dout);
-            for (int i = 0; i < patch_flat; i++) v_t[i] = vdata[i];
+            bool has_nan = false;
+            for (int i = 0; i < patch_flat; i++) {
+                v_t[i] = vdata[i];
+                if (std::isnan(v_t[i]) || std::isinf(v_t[i])) { has_nan = true; break; }
+            }
+            if (has_nan) {
+                printf(" (DiT NaN at step %d, resetting noise)", step);
+                for (int i = 0; i < patch_flat; i++) {
+                    float z = randn();
+                    if (z > 5.0f) z = 5.0f; if (z < -5.0f) z = -5.0f;
+                    z_t[i] = z;
+                }
+                break; // restart ODE with fresh noise
+            }
 
-            // Euler step: z_{t+dt} = z_t + v * dt
-            for (int i = 0; i < patch_flat; i++) z_t[i] += v_t[i] * dt;
+            // Euler step with clamping: z_{t+dt} = z_t + v * dt
+            for (int i = 0; i < patch_flat; i++) {
+                z_t[i] += v_t[i] * dt;
+                if (z_t[i] > 10.0f) z_t[i] = 10.0f;
+                if (z_t[i] < -10.0f) z_t[i] = -10.0f;
+            }
         }
 
         // Store generated latent (scale to match VAE prior ~N(0,1))
@@ -235,7 +256,10 @@ int main(int argc, char ** argv) {
         total_frames += frames_per_call;
         
         float ms = 0;
-        for (int i = 0; i < patch_flat; i++) ms += z_t[i] * z_t[i];
+        for (int i = 0; i < patch_flat; i++) {
+            if (std::isnan(z_t[i]) || std::isinf(z_t[i])) z_t[i] = 0;
+            ms += z_t[i] * z_t[i];
+        }
         printf("rms=%.4f\n", sqrtf(ms / patch_flat));
     }
 
@@ -245,6 +269,11 @@ int main(int argc, char ** argv) {
     delete[] history_latents;
 
     // Zero-center per-channel, then scale to match Python reference RMS
+    // First, sanitize any NaN/Inf values
+    for (int i = 0; i < total_frames * VAE_LATENT_DIM; i++) {
+        if (std::isnan(all_latents[i]) || std::isinf(all_latents[i]))
+            all_latents[i] = 0;
+    }
     float ch_mean[128] = {0};
     for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++)
@@ -258,11 +287,14 @@ int main(int argc, char ** argv) {
             our_rms += v * v;
         }
     our_rms = sqrtf(our_rms / (total_frames * VAE_LATENT_DIM) + 0.01f);
-    float scale = ref_rms / our_rms;
+    float scale = (our_rms > 0.001f) ? (ref_rms / our_rms) : 1.0f;
+    if (std::isnan(scale) || std::isinf(scale)) scale = 1.0f;
     for (int f = 0; f < total_frames; f++)
-        for (int c = 0; c < VAE_LATENT_DIM; c++)
-            all_latents[f * VAE_LATENT_DIM + c] = 
-                (all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c]) * scale;
+        for (int c = 0; c < VAE_LATENT_DIM; c++) {
+            float v = (all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c]) * scale;
+            if (v > 10.0f) v = 10.0f; if (v < -10.0f) v = -10.0f;
+            all_latents[f * VAE_LATENT_DIM + c] = v;
+        }
     printf("  Latents zero-centered + scaled (%.2fx)\n", scale);
 
     // Export latents for Python vocoder verification

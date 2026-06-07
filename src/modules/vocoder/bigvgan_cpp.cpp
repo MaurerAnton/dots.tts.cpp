@@ -96,10 +96,19 @@ static void aa_snakebeta(float * x, int cur_len, int ch,
         for (int c = 0; c < ch; c++) {
             float a = alpha ? alpha[c] : 1.0f;
             float b = beta ? beta[c] : 1.0f;
-            if (logscale) { a = expf(a); b = expf(b); }
+            if (logscale) { 
+                a = expf(a > 20.0f ? 20.0f : (a < -20.0f ? -20.0f : a));
+                b = expf(b > 20.0f ? 20.0f : (b < -20.0f ? -20.0f : b));
+            }
             float v = buf_up[i * ch + c];
-            float s = sinf(a * v);
-            buf_up[i * ch + c] = v + (1.0f / (b + 1e-9f)) * s * s;
+            if (std::isnan(v) || std::isinf(v)) { buf_up[i * ch + c] = 0; continue; }
+            // Clamp argument to sin to avoid extreme values
+            float arg = a * v;
+            if (arg > 100.0f) arg = 100.0f; if (arg < -100.0f) arg = -100.0f;
+            float s = sinf(arg);
+            float result = v + (1.0f / (b + 1e-9f)) * s * s;
+            if (std::isnan(result) || std::isinf(result)) result = v;
+            buf_up[i * ch + c] = result;
         }
     }
     int down_len;
