@@ -74,7 +74,7 @@ target_include_directories(e2e_pipeline PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
 )
-target_link_libraries(e2e_pipeline PRIVATE ${LLAMA_LIB} ggml pthread m)
+target_link_libraries(e2e_pipeline PRIVATE ggml pthread m)
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
@@ -100,3 +100,13 @@ target_link_libraries(test_vocoder PRIVATE ggml pthread m)
 # ---- C++ Web demo server (replaces Flask) ----
 add_executable(web_server web_server.cpp)
 target_link_libraries(web_server PRIVATE pthread)
+
+# ---- Test dots LLM loading ----
+add_executable(test_llm test_llm.cpp)
+target_include_directories(test_llm PRIVATE
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/common
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_llm PRIVATE ${LLAMA_LIB} ggml pthread m)

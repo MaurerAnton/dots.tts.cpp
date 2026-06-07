@@ -6,13 +6,13 @@
 #include "audiovae.h"
 #include "bigvgan_cpp.h"
 #include "safetensors.h"
-#include "llama.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <cstdint>
 
 // VAE encoder per-channel statistics (from dots.tts latent_stats.pt)
 static const float VAE_MEAN[128] = {
@@ -68,34 +68,60 @@ int main(int argc, char ** argv) {
     const char * text = argc > 1 ? argv[1] : "Hello world";
     printf("dots.tts.cpp v2 - Proper flow matching\nInput: '%s'\n\n", text);
 
-    // === Phase 1: LLM ===
-    printf("[1] LLM loading + decode...\n");
-    llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = 0;
-    llama_model * llm = llama_model_load_from_file("/home/bym/dots.tts.cpp/models/llm_qwen25_1.5b.gguf", mp);
-    if (!llm) { printf("FAILED\n"); return 1; }
-    int n_embd = llama_model_n_embd(llm);
-
-    llama_context_params cp = llama_context_default_params();
-    cp.n_ctx = 256; cp.n_batch = 256; cp.embeddings = true;
-    llama_context * lctx = llama_init_from_model(llm, cp);
-
-    llama_token tokens[256];
-    int n_tok = llama_tokenize(llama_model_get_vocab(llm), text, strlen(text), tokens, 256, true, false);
-    llama_batch batch = llama_batch_get_one(tokens, n_tok);
-    if (llama_decode(lctx, batch) != 0) { printf("Decode failed\n"); return 1; }
-
+    // === Phase 1: Token embedding lookup (replaces Qwen LLM) ===
+    printf("[1] Token embedding lookup...\n");
+    
+    // Load token embedding table from dots.tts model (932 MB)
+    FILE * tef = fopen("models/token_embd.bin", "rb");
+    if (!tef) { printf("FAILED: models/token_embd.bin not found. Run: python3.12 models/save_token_embd.py\n"); return 1; }
+    fseek(tef, 0, SEEK_END);
+    long tef_sz = ftell(tef);
+    int n_embd = 1536;
+    int vocab_size = tef_sz / (n_embd * sizeof(float));
+    fseek(tef, 0, SEEK_SET);
+    float * embd_table = new float[vocab_size * n_embd];
+    fread(embd_table, sizeof(float), vocab_size * n_embd, tef);
+    fclose(tef);
+    printf("  Loaded token embeddings: vocab=%d (%.1f MB)\n", vocab_size, tef_sz/1e6);
+    
+    // Read token IDs from file (produced by Python tokenizer)
+    // Format: binary int32 array of token IDs
+    FILE * tf = fopen("tokens.bin", "rb");
+    if (!tf) { printf("FAILED: tokens.bin not found. Run models/tokenize.py first.\n"); return 1; }
+    fseek(tf, 0, SEEK_END);
+    long tok_sz = ftell(tf);
+    int n_tok = tok_sz / sizeof(int32_t);
+    fseek(tf, 0, SEEK_SET);
+    int32_t * token_ids = new int32_t[n_tok];
+    fread(token_ids, sizeof(int32_t), n_tok, tf);
+    fclose(tf);
+    printf("  Loaded %d token IDs from tokens.bin\n", n_tok);
+    
+    // Look up embeddings
     float * hiddens = new float[n_tok * n_embd];
     for (int i = 0; i < n_tok; i++) {
-        float * e = llama_get_embeddings_ith(lctx, i);
-        if (e) memcpy(hiddens + i * n_embd, e, n_embd * sizeof(float));
+        int tid = token_ids[i];
+        if (tid < 0 || tid >= vocab_size) tid = 0;
+        memcpy(hiddens + i * n_embd, embd_table + tid * n_embd, n_embd * sizeof(float));
     }
-    printf("  %d tokens, hidden states extracted\n", n_tok);
-    llama_free(lctx); llama_model_free(llm);
+    delete[] token_ids;
+    delete[] embd_table;
+    
+    // Normalize: LLM hidden states have per-element RMS ~1.0 after RMSNorm.
+    // Raw token embeddings have very low RMS (~0.007). Scale to match.
+    {
+        float rms = 0;
+        for (int i = 0; i < n_tok * n_embd; i++) rms += hiddens[i] * hiddens[i];
+        rms = sqrtf(rms / (n_tok * n_embd));
+        float scale = 1.0f / (rms + 1e-8f);
+        for (int i = 0; i < n_tok * n_embd; i++) hiddens[i] *= scale;
+        printf("  Norm: embedding RMS %.4f -> ~1.0 (x%.0f)\n", rms, scale);
+    }
 
     // === Phase 2: DiT weights ===
     printf("[2] Loading DiT weights...\n");
     SafeTensorsFile sf;
-    sf.open("/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-base/blobs/69dbad797566b24003506e1dd698597937149920f6df9782d84214bf477acb48");
+    sf.open("/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-soar/snapshots/1fd9452e55c2c9f38fe1a8ee09eaf7448c222d35/model.safetensors");
     ggml_init_params wp = { .mem_size = 4ULL*1024*1024*1024 };
     ggml_context * w_ctx = ggml_init(wp);
     dit_model dit;
