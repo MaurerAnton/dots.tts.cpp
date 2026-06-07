@@ -19,6 +19,7 @@ struct BigVGANDecoder {
     int rb_kernel1[18], rb_dilation1[18], rb_kernel2[18], rb_dilation2[18], rb_channels[18];
     
     BigVGANTensor conv_post_w, conv_post_b;
+    BigVGANTensor act_post_alpha, act_post_beta;
     std::vector<float> buf1, buf2;
 };
 

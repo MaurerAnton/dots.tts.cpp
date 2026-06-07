@@ -306,7 +306,7 @@ int main(int argc, char ** argv) {
     // Auto-call Python vocoder bridge for real audio
     printf("\n[6] Real BigVGAN vocoder...\n");
     
-    // Try Python bridge first (proven, real audio)
+    // Use Python bridge (proven, real audio)
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
         "/usr/bin/python3.12 ../models/vocoder_bridge.py latents.bin output_real.wav 2>/dev/null");

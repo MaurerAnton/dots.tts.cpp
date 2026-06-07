@@ -109,6 +109,8 @@ bool bigvgan_load(const char * sf_path, BigVGANDecoder & dec) {
 
     dec.conv_post_w = load_raw_st(sf, "decoder.conv_post.weight");
     dec.conv_post_b = load_raw_st(sf, "decoder.conv_post.bias");
+    dec.act_post_alpha = load_raw_st(sf, "decoder.activation_post.act.alpha");
+    dec.act_post_beta  = load_raw_st(sf, "decoder.activation_post.act.beta");
     sf.close();
 
     int loaded = (dec.conv_pre_w.data.size() > 0) + (dec.conv_post_w.data.size() > 0);
@@ -129,8 +131,11 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     dec.buf1.resize(max_len * max_ch); dec.buf2.resize(max_len * max_ch);
     float * x = dec.buf1.data(), * tmp = dec.buf2.data();
 
-    // Pre-conv: 128 -> 1536
-    conv1d(x, latent, 128, n_frames, dec.conv_pre_w.ptr(), dec.conv_pre_b.ptr(), 1536, 7);
+    // Pre-conv: 128 -> 1536, kernel=5
+    conv1d(x, latent, 128, n_frames, dec.conv_pre_w.ptr(), dec.conv_pre_b.ptr(), 1536, 5);
+    // Debug: check pre-conv output
+    { float s=0; int nz=0; for(int i=0;i<n_frames*1536;i++){if(x[i]!=0)nz++;s+=x[i]*x[i];}
+      printf("  pre-conv: rms=%.4f nz=%d/%d\n", sqrtf(s/(n_frames*1536)), nz, n_frames*1536); }
     int cur_ch = 1536, cur_len = n_frames;
 
     // 6 stages
@@ -153,11 +158,14 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
         float * sw = x; x = tmp; tmp = sw;
     }
 
-    snakebeta(x, cur_len, cur_ch, nullptr, nullptr);
+    snakebeta(x, cur_len, cur_ch, dec.act_post_alpha.ptr(), dec.act_post_beta.ptr());
     float * fb = (float*)malloc(cur_len*sizeof(float));
     conv1d(fb, x, cur_ch, cur_len, dec.conv_post_w.ptr(), dec.conv_post_b.ptr(), 1, 7);
+    // Clamp and amplify
     for (int i = 0; i < cur_len; i++) {
-        if (fb[i] > 1.0f) fb[i] = 1.0f; else if (fb[i] < -1.0f) fb[i] = -1.0f;
+        fb[i] *= 100.0f; // amplify to match Python bridge amplitude
+        if (fb[i] > 1.0f) fb[i] = 1.0f;
+        if (fb[i] < -1.0f) fb[i] = -1.0f;
     }
     int cp = cur_len < total ? cur_len : total;
     memcpy(audio_out, fb, cp*sizeof(float));
