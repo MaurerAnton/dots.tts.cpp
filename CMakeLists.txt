@@ -51,6 +51,25 @@ target_include_directories(llm_test PRIVATE
 )
 target_link_libraries(llm_test PRIVATE ${LLAMA_LIB} ggml pthread m)
 
+# ---- End-to-end pipeline ----
+add_executable(e2e_pipeline
+    src/e2e_pipeline.cpp
+    src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/patchenc.cpp
+    src/modules/vocoder/audiovae.cpp
+    src/utils/safetensors.cpp
+    src/utils/dit_loader.cpp
+    src/utils/patchenc_loader.cpp
+)
+target_include_directories(e2e_pipeline PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/common
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(e2e_pipeline PRIVATE ${LLAMA_LIB} ggml pthread m)
+
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(dots_tts PRIVATE OpenMP::OpenMP_CXX)
