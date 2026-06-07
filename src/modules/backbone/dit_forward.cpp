@@ -461,8 +461,45 @@ ggml_tensor * dit_forward(
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
     }
 
-    // Output projection
-    ggml_tensor * out = ggml_mul_mat(ctx, model.out_proj_w, x);
+    // Output: adaLN modulation + linear projection
+    // adaLN: cond -> [shift, scale] each [hidden, n_batch], broadcast to [hidden, n_tokens]
+    ggml_tensor * out = x;
+    if (model.out_adaln_w) {
+        // Compute modulation: cond [ada_dim, n_batch] @ out_adaln_w [ada_dim, 2*hidden] -> [2*hidden, n_batch]
+        ggml_tensor * mod = ggml_mul_mat(ctx, model.out_adaln_w, cond); // [2*hidden, n_batch]
+        
+        // Split into shift [hidden, n_batch] and scale [hidden, n_batch]
+        int stride = DIT_HIDDEN_SIZE;
+        ggml_tensor * shift = ggml_view_2d(ctx, mod, DIT_HIDDEN_SIZE, n_batch, mod->nb[1], 0);
+        ggml_tensor * scale = ggml_view_2d(ctx, mod, DIT_HIDDEN_SIZE, n_batch, mod->nb[1], stride * sizeof(float));
+        
+        // Broadcast to [hidden, n_tokens] by repeating seq_len times
+        // Use manual broadcast: copy values
+        int n_tokens = seq_len * n_batch;
+        ggml_tensor * shift_tok = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, n_tokens);
+        ggml_tensor * scale_tok = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, n_tokens);
+        {
+            float * ss = tensor_data(shift), * sd = tensor_data(shift_tok);
+            float * cs = tensor_data(scale), * cd = tensor_data(scale_tok);
+            for (int s = 0; s < seq_len; s++)
+                for (int b = 0; b < n_batch; b++) {
+                    memcpy(sd + (b * seq_len + s) * DIT_HIDDEN_SIZE,
+                           ss + b * DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE * sizeof(float));
+                    memcpy(cd + (b * seq_len + s) * DIT_HIDDEN_SIZE,
+                           cs + b * DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE * sizeof(float));
+                }
+        }
+        
+        // Apply adaLN: norm(x) * (1 + scale) + shift
+        out = ggml_rms_norm(ctx, out, 1e-6f);
+        // Create ones tensor
+        ggml_tensor * ones = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, n_tokens);
+        for (int i = 0; i < DIT_HIDDEN_SIZE * n_tokens; i++) ((float*)tensor_data(ones))[i] = 1.0f;
+        ggml_tensor * scale_1 = ggml_add(ctx, ones, scale_tok);
+        out = ggml_mul(ctx, out, scale_1);
+        out = ggml_add(ctx, out, shift_tok);
+    }
+    out = ggml_mul_mat(ctx, model.out_proj_w, out);
 
     return out; // [latent_dim, n_tokens] = [VAE_LATENT_DIM, seq_len * n_batch]
 }

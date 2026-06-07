@@ -240,28 +240,31 @@ int main(int argc, char ** argv) {
     delete[] v_t;
     delete[] history_latents;
 
-    // VAE per-channel re-standardization + mapping
-    // Step 1: compute per-channel mean/std of our latents
-    float our_mean[128] = {0}, our_std[128] = {0};
+    // Zero-center per-channel, then scale to match Python reference statistics
+    // Compute per-channel means
+    float ch_mean[128] = {0};
     for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++)
-            our_mean[c] += all_latents[f * VAE_LATENT_DIM + c];
-    for (int c = 0; c < VAE_LATENT_DIM; c++) our_mean[c] /= total_frames;
-    for (int f = 0; f < total_frames; f++)
-        for (int c = 0; c < VAE_LATENT_DIM; c++) {
-            float d = all_latents[f * VAE_LATENT_DIM + c] - our_mean[c];
-            our_std[c] += d * d;
-        }
-    for (int c = 0; c < VAE_LATENT_DIM; c++)
-        our_std[c] = sqrtf(our_std[c] / total_frames + 0.01f); // epsilon
+            ch_mean[c] += all_latents[f * VAE_LATENT_DIM + c];
+    for (int c = 0; c < VAE_LATENT_DIM; c++) ch_mean[c] /= total_frames;
     
-    // Step 2: standardize to N(0,1), then map to VAE space
+    // Subtract means (zero-center) and scale to match reference RMS (~3.73 vs ours ~2.0)
+    float ref_rms = 3.73f;
+    float our_rms = 0;
     for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++) {
-            float z = (all_latents[f * VAE_LATENT_DIM + c] - our_mean[c]) / our_std[c];
-            all_latents[f * VAE_LATENT_DIM + c] = z * VAE_STD[c] + VAE_MEAN[c];
+            float v = all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c];
+            our_rms += v * v;
         }
-    printf("  Latents mapped to VAE space\n");
+    our_rms = sqrtf(our_rms / (total_frames * VAE_LATENT_DIM) + 0.01f);
+    float scale = ref_rms / our_rms;
+    
+    for (int f = 0; f < total_frames; f++)
+        for (int c = 0; c < VAE_LATENT_DIM; c++)
+            all_latents[f * VAE_LATENT_DIM + c] = 
+                (all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c]) * scale;
+    
+    printf("  Latents zero-centered + scaled to ref RMS (%.2fx)\n", scale);
 
     // Export latents for Python vocoder verification
     FILE * lf = fopen("latents.bin", "wb");
