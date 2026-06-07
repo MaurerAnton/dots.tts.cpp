@@ -15,6 +15,7 @@ set(DOTS_TTS_SOURCES
     src/modules/backbone/dit_forward.cpp
     src/modules/backbone/flow_matching.cpp
     src/modules/backbone/patchenc.cpp
+    src/modules/vocoder/audiovae.cpp
     src/main.cpp
 )
 

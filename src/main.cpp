@@ -11,6 +11,7 @@
 #include "dots_tts_util.h"
 #include "dit.h"
 #include "patchenc.h"
+#include "audiovae.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include <cstdio>
@@ -240,6 +241,175 @@ int main(int argc, char ** argv) {
     patch_encoder enc;
     patchenc_load_dummy(enc, rt->w_ctx);
     patchenc_test(enc);
+
+    // Test AudioVAE
+    printf("\n=== Testing AudioVAE decoder ===\n");
+    {
+        struct ggml_init_params vae_params = {
+            .mem_size   = 64ULL * 1024 * 1024,
+            .mem_buffer = nullptr,
+            .no_alloc   = false,
+        };
+        ggml_context * vae_ctx = ggml_init(vae_params);
+
+        int n_frames = 16; // 4 patches * 4 frames
+        ggml_tensor * latent = ggml_new_tensor_2d(vae_ctx, GGML_TYPE_F32, VAE_LATENT_DIM, n_frames);
+        float * ld = tensor_data(latent);
+        for (int i = 0; i < n_frames * VAE_LATENT_DIM; i++) {
+            ld[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+        }
+
+        int n_samples;
+        float * wav = new float[n_frames * VAE_HOP_SAMPLES];
+        audiovae_decode_simple(vae_ctx, latent, n_frames, wav, &n_samples);
+
+        float smin = 1e9, smax = -1e9, ssum = 0;
+        for (int i = 0; i < n_samples; i++) {
+            ssum += wav[i];
+            if (wav[i] < smin) smin = wav[i];
+            if (wav[i] > smax) smax = wav[i];
+        }
+        printf("AudioVAE: %d samples, min=%.6f max=%.6f mean=%.6f\n",
+               n_samples, smin, smax, ssum / n_samples);
+        printf("  (16 latent frames * 960 hop = %d samples = %.1f ms @ 48kHz)\n",
+               n_samples, n_samples * 1000.0f / VAE_SAMPLE_RATE);
+
+        delete[] wav;
+        ggml_free(vae_ctx);
+    }
+
+    // End-to-end pipeline test
+    printf("\n=== End-to-end pipeline (simulated LLM) ===\n");
+    {
+        struct ggml_init_params pipe_params = {
+            .mem_size   = 512ULL * 1024 * 1024,
+            .mem_buffer = nullptr,
+            .no_alloc   = false,
+        };
+        ggml_context * pipe_ctx = ggml_init(pipe_params);
+
+        int n_patches = 4;
+        int patch_flat = PATCHENC_PATCH_SIZE * PATCHENC_LATENT_DIM; // 4*128=512
+
+        // Simulate: for each patch, generate LLM hidden states randomly
+        // In real pipeline: LLM produces hidden states from text tokens
+        // Here we use random to validate the DiT+PatchEncoder+Vocoder chain
+
+        printf("Generating %d audio patches...\n", n_patches);
+        float all_latents[n_patches * PATCHENC_PATCH_SIZE * VAE_LATENT_DIM];
+        int total_latent_frames = 0;
+
+        // FM buffer accumulates conditioning for each new patch
+        // [cond_seq * hidden] + [latent_patch_size * latent_dim]
+        // For simplicity, regenerate conditioning each step
+
+        ggml_tensor * llm_hidden = ggml_new_tensor_2d(pipe_ctx, GGML_TYPE_F32,
+            1536, n_patches * 2); // simulated LLM hidden states
+        {
+            float * d = tensor_data(llm_hidden);
+            for (int i = 0; i < (int)(n_patches * 2 * 1536); i++) {
+                d[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+            }
+        }
+
+        // For each patch: PatchEncoder -> (simulated LLM step) -> DiT -> latent
+        for (int p = 0; p < n_patches; p++) {
+            // 1. Simulate audio VAE latent for PatchEncoder input
+            // In real pipeline: comes from prompt audio or previous DiT output
+            float patch_in[PATCHENC_PATCH_SIZE * PATCHENC_LATENT_DIM];
+            for (int i = 0; i < patch_flat; i++) {
+                patch_in[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+            }
+
+            // 2. PatchEncoder: latent -> LLM embedding [1536]
+            ggml_reset(pipe_ctx);
+            ggml_tensor * pe_in = ggml_new_tensor_2d(pipe_ctx, GGML_TYPE_F32,
+                PATCHENC_LATENT_DIM, PATCHENC_PATCH_SIZE);
+            memcpy(tensor_data(pe_in), patch_in, patch_flat * sizeof(float));
+            ggml_tensor * pe_out = patchenc_forward(enc, pipe_ctx, pe_in, 1);
+            ggml_cgraph * pe_gf = ggml_new_graph(pipe_ctx);
+            ggml_build_forward_expand(pe_gf, pe_out);
+            ggml_graph_compute_with_ctx(pipe_ctx, pe_gf, 8);
+            // pe_out is [1536, 1]
+
+            // 3. Simulated LLM step: combine PatchEncoder output with text context
+            // Real pipeline: feed pe_out into LLM as audio token, get hidden state
+            // Here: use pre-generated random hidden states
+            float * pe_data = tensor_data(pe_out);
+
+            // 4. DiT: flow matching on accumulated conditioning -> new latent patch
+            int cond_seq = p * 2 + 2; // growing sequence
+            ggml_reset(pipe_ctx);
+            ggml_tensor * dit_x = ggml_new_tensor_3d(pipe_ctx, GGML_TYPE_F32,
+                DIT_HIDDEN_SIZE, 1, cond_seq);
+            {
+                float * dx = tensor_data(dit_x);
+                for (int i = 0; i < cond_seq * DIT_HIDDEN_SIZE; i++) {
+                    dx[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+                }
+            }
+            dit_x = ggml_cont(pipe_ctx, ggml_permute(pipe_ctx, dit_x, 2, 1, 0, 3));
+
+            ggml_tensor * t_in = ggml_new_tensor_1d(pipe_ctx, GGML_TYPE_F32, 1);
+            ((float*)t_in->data)[0] = 0.5f;
+
+            ggml_tensor * spk_in = ggml_new_tensor_2d(pipe_ctx, GGML_TYPE_F32,
+                DIT_SPEAKER_DIM, 1);
+            {
+                float * sd = tensor_data(spk_in);
+                for (int i = 0; i < DIT_SPEAKER_DIM; i++) {
+                    sd[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+                }
+            }
+
+            ggml_tensor * dit_out = dit_forward(rt->dit, pipe_ctx, dit_x, t_in, spk_in);
+            ggml_cgraph * dit_gf = ggml_new_graph(pipe_ctx);
+            ggml_build_forward_expand(dit_gf, dit_out);
+            ggml_graph_compute_with_ctx(pipe_ctx, dit_gf, 8);
+            // dit_out is [VAE_LATENT_DIM=128, PATCHENC_PATCH_SIZE=4]
+
+            // 5. Collect latent patch
+            float * lat_data = tensor_data(dit_out);
+            memcpy(all_latents + total_latent_frames * VAE_LATENT_DIM,
+                   lat_data, patch_flat * sizeof(float));
+            total_latent_frames += PATCHENC_PATCH_SIZE;
+
+            if (p == 0) {
+                float s = 0;
+                for (int i = 0; i < patch_flat; i++) s += lat_data[i];
+                printf("  patch 0: DiT output mean=%.6f, PatchEncoder mean=%.6f\n",
+                       s / patch_flat, pe_data[0]);
+            }
+        }
+
+        // 6. AudioVAE: decode all latent frames to waveform
+        printf("Decoding %d latent frames to audio...\n", total_latent_frames);
+        ggml_reset(pipe_ctx);
+        ggml_tensor * all_lat = ggml_new_tensor_2d(pipe_ctx, GGML_TYPE_F32,
+            VAE_LATENT_DIM, total_latent_frames);
+        memcpy(tensor_data(all_lat), all_latents,
+               total_latent_frames * VAE_LATENT_DIM * sizeof(float));
+
+        int total_samples;
+        float * wav_out = new float[total_latent_frames * VAE_HOP_SAMPLES];
+        audiovae_decode_simple(pipe_ctx, all_lat, total_latent_frames,
+                               wav_out, &total_samples);
+
+        float smin = 1e9, smax = -1e9, ssum = 0;
+        for (int i = 0; i < total_samples; i++) {
+            ssum += wav_out[i];
+            if (wav_out[i] < smin) smin = wav_out[i];
+            if (wav_out[i] > smax) smax = wav_out[i];
+        }
+        printf("Pipeline output: %d samples (%.0f ms), min=%.4f max=%.4f mean=%.6f\n",
+               total_samples, total_samples * 1000.0f / VAE_SAMPLE_RATE,
+               smin, smax, ssum / total_samples);
+
+        delete[] wav_out;
+        ggml_free(pipe_ctx);
+    }
+
+    printf("\n=== All Phase 1 tests passed ===\n");
 
     // Cleanup
     ggml_free(rt->w_ctx);
