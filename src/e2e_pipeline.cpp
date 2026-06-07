@@ -303,12 +303,11 @@ int main(int argc, char ** argv) {
         printf("  Wrote %s: %d samples, %.2f sec\n", wav_path, n_samples, n_samples/(float)VAE_SAMPLE_RATE);
     }
 
-    // Auto-call Python vocoder bridge for real audio
+    // Pure C++ BigVGAN vocoder (no Python fallback needed)
     printf("\n[6] C++ BigVGAN vocoder...\n");
     
-    // Try C++ BigVGAN first
     BigVGANDecoder bigvgan;
-    const char * vp = "/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-base/snapshots/6050dd598c4161d18703bb2a34ecb5588da7804e/vocoder.safetensors";
+    const char * vp = "/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-soar/snapshots/1fd9452e55c2c9f38fe1a8ee09eaf7448c222d35/vocoder.safetensors";
     if (bigvgan_load(vp, bigvgan)) {
         printf("  C++ BigVGAN decoding...\n");
         int real_samples;
@@ -333,10 +332,7 @@ int main(int argc, char ** argv) {
         }
         delete[] real_wav; bigvgan_free(bigvgan);
     } else {
-        // Fallback: Python bridge
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "/usr/bin/python3.12 ../models/vocoder_bridge.py latents.bin output_real.wav 2>/dev/null");
-        if (system(cmd) == 0) { rename("output_real.wav", "output.wav"); printf("  output.wav (Python)\n"); }
+        printf("  BigVGAN load failed\n");
     }
 
     delete[] wav; delete[] all_latents;

@@ -96,3 +96,7 @@ target_include_directories(test_vocoder PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
 )
 target_link_libraries(test_vocoder PRIVATE ggml pthread m)
+
+# ---- C++ Web demo server (replaces Flask) ----
+add_executable(web_server web_server.cpp)
+target_link_libraries(web_server PRIVATE pthread)
