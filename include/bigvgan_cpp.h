@@ -15,8 +15,8 @@ struct BigVGANDecoder {
     int ups_stride[6], ups_kernel[6], ups_in_ch[6], ups_out_ch[6];
     
     BigVGANTensor rb_conv1_w[18], rb_conv1_b[18], rb_conv2_w[18], rb_conv2_b[18];
-    BigVGANTensor rb_alpha[18], rb_beta[18];
-    int rb_kernel1[18], rb_dilation1[18], rb_kernel2[18], rb_dilation2[18], rb_channels[18];
+    BigVGANTensor rb_alpha[18][2], rb_beta[18][2]; // 2 groups of 3 activations each
+    int rb_kernel[18][3], rb_dilation[18][3];
     
     BigVGANTensor conv_post_w, conv_post_b;
     BigVGANTensor act_post_alpha, act_post_beta;

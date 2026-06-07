@@ -89,9 +89,7 @@ bool bigvgan_load(const char * sf_path, BigVGANDecoder & dec) {
     for (int s = 0; s < 6; s++)
         for (int j = 0; j < 3; j++) {
             int idx = s*3 + j; char name[128];
-            dec.rb_channels[idx] = ch_map[s];
-            dec.rb_kernel1[idx] = kmap[j]; dec.rb_dilation1[idx] = dmap[j];
-            dec.rb_kernel2[idx] = kmap[j]; dec.rb_dilation2[idx] = dmap[j];
+            dec.rb_kernel[idx][j] = kmap[j]; dec.rb_dilation[idx][j] = dmap[j];
 
             snprintf(name, sizeof(name), "decoder.resblocks.%d.convs1.%d.weight", idx, j);
             dec.rb_conv1_w[idx] = load_raw_st(sf, name);
@@ -102,9 +100,15 @@ bool bigvgan_load(const char * sf_path, BigVGANDecoder & dec) {
             snprintf(name, sizeof(name), "decoder.resblocks.%d.convs2.%d.bias", idx, j);
             dec.rb_conv2_b[idx] = load_raw_st(sf, name);
             snprintf(name, sizeof(name), "decoder.resblocks.%d.activations.%d.act.alpha", idx, j);
-            dec.rb_alpha[idx] = load_raw_st(sf, name);
+            dec.rb_alpha[idx][0] = load_raw_st(sf, name);  // group 0: j=0,1,2
             snprintf(name, sizeof(name), "decoder.resblocks.%d.activations.%d.act.beta", idx, j);
-            dec.rb_beta[idx] = load_raw_st(sf, name);
+            dec.rb_beta[idx][0] = load_raw_st(sf, name);
+            // Load second group (j+3): activations 3,4,5 share same conv weights
+            int j2 = j + 3;
+            snprintf(name, sizeof(name), "decoder.resblocks.%d.activations.%d.act.alpha", idx, j2);
+            dec.rb_alpha[idx][1] = load_raw_st(sf, name);
+            snprintf(name, sizeof(name), "decoder.resblocks.%d.activations.%d.act.beta", idx, j2);
+            dec.rb_beta[idx][1] = load_raw_st(sf, name);
         }
 
     dec.conv_post_w = load_raw_st(sf, "decoder.conv_post.weight");
@@ -145,15 +149,21 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
         cur_ch = oc; cur_len *= stride;
 
         memset(x, 0, cur_len * cur_ch * sizeof(float));
-        for (int j = 0; j < 3; j++) {
-            int idx = s*3 + j, ch = dec.rb_channels[idx];
-            float * b1 = (float*)malloc(cur_len*ch*sizeof(float));
-            float * b2 = (float*)malloc(cur_len*ch*sizeof(float));
-            conv1d(b1, tmp, ch, cur_len, dec.rb_conv1_w[idx].ptr(), dec.rb_conv1_b[idx].ptr(), ch, dec.rb_kernel1[idx], dec.rb_dilation1[idx]);
-            snakebeta(b1, cur_len, ch, dec.rb_alpha[idx].ptr(), dec.rb_beta[idx].ptr());
-            conv1d(b2, b1, ch, cur_len, dec.rb_conv2_w[idx].ptr(), dec.rb_conv2_b[idx].ptr(), ch, dec.rb_kernel2[idx], dec.rb_dilation2[idx]);
-            for (int i = 0; i < cur_len*ch; i++) x[i] += b2[i] / 3.0f;
-            free(b1); free(b2);
+        int ch = dec.ups_out_ch[s];
+        // 6 AMP block variants: 3 conv weights x 2 activation groups
+        for (int g = 0; g < 2; g++) {  // group 0: act 0-2, group 1: act 3-5
+            for (int j = 0; j < 3; j++) {
+                int idx = s*3 + j;
+                float * b1 = (float*)malloc(cur_len*ch*sizeof(float));
+                float * b2 = (float*)malloc(cur_len*ch*sizeof(float));
+                conv1d(b1, tmp, ch, cur_len, dec.rb_conv1_w[idx].ptr(), dec.rb_conv1_b[idx].ptr(), 
+                       ch, dec.rb_kernel[idx][j], dec.rb_dilation[idx][j]);
+                snakebeta(b1, cur_len, ch, dec.rb_alpha[idx][g].ptr(), dec.rb_beta[idx][g].ptr());
+                conv1d(b2, b1, ch, cur_len, dec.rb_conv2_w[idx].ptr(), dec.rb_conv2_b[idx].ptr(),
+                       ch, dec.rb_kernel[idx][j], dec.rb_dilation[idx][j]);
+                for (int i = 0; i < cur_len*ch; i++) x[i] += b2[i] / 6.0f;  // average over 6
+                free(b1); free(b2);
+            }
         }
         float * sw = x; x = tmp; tmp = sw;
     }
