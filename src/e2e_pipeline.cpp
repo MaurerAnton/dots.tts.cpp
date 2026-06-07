@@ -127,7 +127,7 @@ int main(int argc, char ** argv) {
     int nfe = 5; // fewer steps for speed (still reasonable quality)
     float dt = 1.0f / nfe;
 
-    int n_calls = 4; // first 4 calls work without NaN; 4×4=16 frames, 0.64s
+    int n_calls = 6; // 6×4=24 frames, 1.0s
     int frames_per_call = patch_size; // must match z_t size (patch_flat/latent_dim)
     int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
@@ -237,11 +237,11 @@ int main(int argc, char ** argv) {
                 break; // exit ODE loop, use fresh noise for this call
             }
 
-            // Euler step with clamping: z_{t+dt} = z_t + v * dt
+            // Euler step: z_{t+dt} = z_t + v * dt (gentle clamp to prevent runaway)
             for (int i = 0; i < patch_flat; i++) {
                 z_t[i] += v_t[i] * dt;
-                if (z_t[i] > 10.0f) z_t[i] = 10.0f;
-                if (z_t[i] < -10.0f) z_t[i] = -10.0f;
+                if (z_t[i] > 50.0f) z_t[i] = 50.0f;
+                if (z_t[i] < -50.0f) z_t[i] = -50.0f;
             }
         }
 
@@ -294,9 +294,8 @@ int main(int argc, char ** argv) {
     if (std::isnan(scale) || std::isinf(scale)) scale = 1.0f;
     for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++) {
-            float v = (all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c]) * scale;
-            if (v > 10.0f) v = 10.0f; if (v < -10.0f) v = -10.0f;
-            all_latents[f * VAE_LATENT_DIM + c] = v;
+            all_latents[f * VAE_LATENT_DIM + c] = 
+                (all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c]) * scale;
         }
     printf("  Latents zero-centered + scaled (%.2fx)\n", scale);
 

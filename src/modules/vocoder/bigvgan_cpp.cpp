@@ -469,9 +469,12 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
                   1, 7);
     int final_len = cur_len;
 
-    // Clamp to [-1, 1] (no tanh)
+    // Clamp to [-1, 1] (no tanh), then apply output gain
     float * fb = tmp;
+    // Apply gain to compensate for anti-alias filter attenuation
+    const float output_gain = 40.0f;
     for (int i = 0; i < final_len; i++) {
+        fb[i] *= output_gain;
         if (fb[i] > 1.0f) fb[i] = 1.0f;
         if (fb[i] < -1.0f) fb[i] = -1.0f;
     }
