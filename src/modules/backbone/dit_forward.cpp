@@ -4,13 +4,20 @@
 //   2. Element-wise ops on correctly shaped tensors  
 //   3. ggml_rms_norm, ggml_silu, ggml_rope, ggml_soft_max
 
-#include "dit.h"
 #include "dots_tts.h"
 #include "dots_tts_util.h"
+#include "dit.h"
 #include "ggml.h"
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+
+// Multi-head attention (defined in dit_attention.cpp)
+ggml_tensor * dit_attention_multihead(
+    ggml_context * ctx, ggml_tensor * x,
+    ggml_tensor * q_weight, ggml_tensor * k_weight, ggml_tensor * v_weight,
+    ggml_tensor * o_weight, int seq_len, int n_batch,
+    int n_heads, int head_dim, ggml_tensor * q_norm_w, ggml_tensor * k_norm_w);
 
 // ===========================================================================
 // Timestep embedding
@@ -383,9 +390,8 @@ static ggml_tensor * dit_block_forward_simple(
     }
     h = ggml_add(ctx, h, shift_msa_tok);
 
-    // Attention
-    ggml_tensor * attn = dit_attention(ctx, h,
-        nullptr, // qkv_weight (merged) — use separate below
+    // Multi-head attention
+    ggml_tensor * attn = dit_attention_multihead(ctx, h,
         block.attn_q_weight, block.attn_k_weight, block.attn_v_weight,
         block.attn_o_weight,
         seq_len, n_batch, DIT_NUM_HEADS, DIT_HEAD_SIZE,
@@ -452,16 +458,8 @@ ggml_tensor * dit_forward(
     // Step 4: SiLU on combined conditioning
     cond = ggml_silu(ctx, cond);
 
-    // Input layer (Linear + bias before DiT blocks)
+    // Input layer (Linear before DiT blocks)
     if (model.input_layer_w) {
-        // Apply bias manually (ggml doesn't broadcast)
-        if (model.input_layer_b) {
-            float * xd = tensor_data(x);
-            float * bd = tensor_data(model.input_layer_b);
-            for (int i = 0; i < n_tokens; i++)
-                for (int j = 0; j < hidden; j++)
-                    xd[i * hidden + j] += bd[j];
-        }
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
     }
 
@@ -506,16 +504,6 @@ ggml_tensor * dit_forward(
         ggml_tensor * scale_1 = ggml_add(ctx, ones, scale_tok);
         out = ggml_mul(ctx, out, scale_1);
         out = ggml_add(ctx, out, shift_tok);
-    }
-    // Output linear with bias
-    if (model.out_proj_b) {
-        int n_out = model.out_proj_w->ne[1];
-        int nt = seq_len * n_batch;
-        float * od = tensor_data(out);
-        float * bd = tensor_data(model.out_proj_b);
-        for (int i = 0; i < nt; i++)
-            for (int j = 0; j < n_out; j++)
-                od[i * n_out + j] += bd[j];
     }
     out = ggml_mul_mat(ctx, model.out_proj_w, out);
 

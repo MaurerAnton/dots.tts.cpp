@@ -20,6 +20,7 @@ message(STATUS "Found llama: ${LLAMA_LIB}")
 # ---- dots.tts.cpp ----
 set(DOTS_TTS_SOURCES
     src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/dit_attention.cpp
     src/modules/backbone/flow_matching.cpp
     src/modules/backbone/patchenc.cpp
     src/modules/vocoder/audiovae.cpp
@@ -56,6 +57,7 @@ target_link_libraries(llm_test PRIVATE ${LLAMA_LIB} ggml pthread m)
 add_executable(e2e_pipeline
     src/e2e_pipeline.cpp
     src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/dit_attention.cpp
     src/modules/backbone/patchenc.cpp
     src/modules/vocoder/audiovae.cpp
     src/modules/vocoder/bigvgan_cpp.cpp

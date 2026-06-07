@@ -124,10 +124,10 @@ int main(int argc, char ** argv) {
     int patch_size = PATCHENC_PATCH_SIZE; // 4
     int n_patches = 4;
     int patch_flat = patch_size * latent_dim; // 512
-    int nfe = 1; // minimal for speed test
+    int nfe = 10; // full quality
     float dt = 1.0f / nfe;
 
-    int n_calls = 4; // reduced for speed
+    int n_calls = 16;
     int frames_per_call = 1;
     int n_frames_total = n_calls * frames_per_call;
     float * all_latents = new float[n_frames_total * latent_dim];
@@ -213,31 +213,9 @@ int main(int argc, char ** argv) {
             ggml_build_forward_expand(dgf, dout);
             ggml_graph_compute_with_ctx(gctx, dgf, 8);
 
-            // CFG: run unconditional (zero conditioning) and blend
-            // Python uses guidance_scale=1.2
-            float cfg_scale = 1.2f;
-            ggml_reset(gctx);
-            // Build unconditional input: same as dx but all zeros (no text/history conditioning)
-            ggml_tensor * dx_uncond = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
-            memset(tensor_data(dx_uncond), 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
-            // Only copy noise positions (the noise is the same)
-            for (int i = 0; i < patch_size; i++) {
-                float * src = tensor_data(dx) + (noise_pos + i) * DIT_HIDDEN_SIZE;
-                float * dst = tensor_data(dx_uncond) + (noise_pos + i) * DIT_HIDDEN_SIZE;
-                memcpy(dst, src, DIT_HIDDEN_SIZE * sizeof(float));
-            }
-            dx_uncond = ggml_cont(gctx, ggml_permute(gctx, dx_uncond, 2, 1, 0, 3));
-            
-            ggml_tensor * dout_uncond = dit_forward(dit, gctx, dx_uncond, ti, nullptr);
-            ggml_cgraph * dgf2 = ggml_new_graph(gctx);
-            ggml_build_forward_expand(dgf2, dout_uncond);
-            ggml_graph_compute_with_ctx(gctx, dgf2, 8);
-
-            // Blend: v = v_uncond + cfg_scale * (v_cond - v_uncond)
+            // Extract velocity
             float * vdata = tensor_data(dout);
-            float * vdata_uncond = tensor_data(dout_uncond);
-            for (int i = 0; i < patch_flat; i++)
-                v_t[i] = vdata_uncond[i] + cfg_scale * (vdata[i] - vdata_uncond[i]);
+            for (int i = 0; i < patch_flat; i++) v_t[i] = vdata[i];
 
             // Euler step: z_{t+dt} = z_t + v * dt
             for (int i = 0; i < patch_flat; i++) z_t[i] += v_t[i] * dt;
@@ -261,50 +239,26 @@ int main(int argc, char ** argv) {
     delete[] v_t;
     delete[] history_latents;
 
-    // Per-channel linear adapter trained on Python reference latents
-    // Maps our DiT output to match Python DiT distribution
-    // output[c] = input[c] * ADAPTER_A[c] + ADAPTER_B[c]
-    static const float ADAPTER_A[128] = {
-        2.382941f,4.145101f,1.606298f,2.408479f,1.168559f,3.069737f,5.501472f,1.739236f,
-        2.238298f,1.888317f,3.263288f,1.501677f,2.088240f,0.876643f,2.134755f,2.475237f,
-        3.125170f,1.315684f,2.844389f,9.192709f,12.387298f,1.173721f,2.194317f,1.148754f,
-        1.307167f,2.804611f,0.883876f,2.618948f,3.101151f,4.513755f,1.114025f,3.283245f,
-        5.816441f,4.255030f,15.927880f,2.635313f,9.431526f,1.885351f,3.518758f,1.395163f,
-        1.248338f,2.658533f,2.626217f,1.127441f,6.298426f,2.915286f,0.527787f,2.990523f,
-        3.899357f,10.766792f,1.191525f,1.294173f,3.129306f,20.825506f,4.983566f,2.607374f,
-        10.383302f,1.741344f,1.358481f,1.941392f,1.126762f,4.617233f,5.284254f,5.420657f,
-        10.192300f,2.620382f,4.323771f,1.370548f,6.317167f,3.835887f,4.840996f,6.051213f,
-        3.646031f,1.082792f,1.329560f,6.942143f,2.291217f,0.823936f,4.537820f,3.032614f,
-        3.612484f,1.835616f,4.130817f,1.577006f,0.853831f,1.177152f,4.735905f,10.608216f,
-        3.098077f,1.599654f,1.196227f,0.889241f,1.051517f,2.709083f,1.747643f,1.442447f,
-        2.686906f,1.005020f,0.631874f,8.358035f,1.043281f,6.691485f,6.429548f,55.344219f,
-        3.074306f,1.100969f,20.150635f,2.011339f,2.520596f,2.110807f,2.044507f,19.425808f,
-        0.605501f,12.822751f,13.546781f,0.676482f,1.169873f,0.838544f,2.050150f,1.871656f,
-        1.333028f,1.730105f,1.989851f,0.641944f,1.060366f,7.492723f,3.702229f,2.970978f,
-    };
-    static const float ADAPTER_B[128] = {
-        -3.559527f,-0.762301f,-0.725505f,-2.278076f,-0.648461f,3.975596f,4.335115f,1.852163f,
-        -4.465612f,-3.071519f,8.878295f,3.208602f,-4.745744f,2.767663f,6.593433f,7.267823f,
-        5.698847f,3.388205f,-0.326183f,8.541907f,-1.731099f,0.996162f,-0.450109f,-1.473470f,
-        1.464272f,5.434821f,-3.112619f,4.346940f,-6.612900f,-5.326578f,-0.869050f,2.160996f,
-        0.869652f,2.129203f,-8.880505f,3.815781f,-2.006689f,3.638426f,0.355380f,0.335117f,
-        3.284642f,0.520348f,0.345351f,-1.061291f,-1.583468f,1.690501f,-0.653184f,-2.412472f,
-        -1.045594f,-9.811886f,-2.739203f,-2.091820f,-3.753944f,-6.206897f,2.806373f,-0.892272f,
-        -7.951757f,4.113676f,-0.253922f,-4.302339f,-2.755585f,9.995442f,-1.311656f,12.565775f,
-        -2.632834f,3.080742f,5.064390f,5.625532f,-3.861124f,0.695655f,1.051075f,-3.020149f,
-        4.329479f,1.112721f,-2.077737f,-6.482620f,-1.604756f,-1.368270f,-4.511518f,1.413743f,
-        -3.077784f,-6.848868f,7.080961f,1.939547f,-0.523504f,3.694280f,5.708948f,1.491017f,
-        -5.389560f,0.064567f,0.243925f,4.433113f,-4.375381f,-5.884877f,-4.822811f,5.796052f,
-        -4.758646f,2.033148f,0.322973f,8.916317f,-2.088591f,3.332608f,1.282015f,26.753080f,
-        0.312069f,2.139257f,-9.334542f,-2.088420f,8.232735f,-2.728067f,1.224643f,-25.281677f,
-        0.552380f,15.705232f,5.073792f,-2.023370f,-3.458704f,3.075165f,-0.556399f,4.363537f,
-        -2.949120f,0.543271f,-3.217129f,0.698957f,-5.251114f,-5.546518f,-2.314480f,6.042835f,
-    };
+    // Zero-center per-channel, then scale to match Python reference RMS
+    float ch_mean[128] = {0};
     for (int f = 0; f < total_frames; f++)
         for (int c = 0; c < VAE_LATENT_DIM; c++)
-            all_latents[f * VAE_LATENT_DIM + c] =
-                all_latents[f * VAE_LATENT_DIM + c] * ADAPTER_A[c] + ADAPTER_B[c];
-    printf("  Latents adapted to Python ref distribution\n");
+            ch_mean[c] += all_latents[f * VAE_LATENT_DIM + c];
+    for (int c = 0; c < VAE_LATENT_DIM; c++) ch_mean[c] /= total_frames;
+    
+    float ref_rms = 3.73f, our_rms = 0;
+    for (int f = 0; f < total_frames; f++)
+        for (int c = 0; c < VAE_LATENT_DIM; c++) {
+            float v = all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c];
+            our_rms += v * v;
+        }
+    our_rms = sqrtf(our_rms / (total_frames * VAE_LATENT_DIM) + 0.01f);
+    float scale = ref_rms / our_rms;
+    for (int f = 0; f < total_frames; f++)
+        for (int c = 0; c < VAE_LATENT_DIM; c++)
+            all_latents[f * VAE_LATENT_DIM + c] = 
+                (all_latents[f * VAE_LATENT_DIM + c] - ch_mean[c]) * scale;
+    printf("  Latents zero-centered + scaled (%.2fx)\n", scale);
 
     // Export latents for Python vocoder verification
     FILE * lf = fopen("latents.bin", "wb");
