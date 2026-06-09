@@ -38,7 +38,7 @@ static const float AA_FILTER[12] = {
 
 // Causal UpSample1d: NO pad → conv_transpose1d → scale ×2 → trim last (K-stride)
 // filter: [filter_ch, 1, K] — for AMP filter_ch=1, for activation_post filter_ch=ch
-static void aa_upsample(float * out, const float * in, int ch, int in_len,
+void aa_upsample(float * out, const float * in, int ch, int in_len,
                          const float * filter, int filter_ch, int * olen) {
     *olen = in_len * 2;
     int K = 12, stride = 2;
@@ -66,7 +66,7 @@ static void aa_upsample(float * out, const float * in, int ch, int in_len,
 
 // Causal LowPassFilter1d (DownSample1d): pad([K-1], [replicate]) → conv1d(stride=2, groups=ch)
 // filter: [filter_ch, 1, K]
-static void aa_downsample(float * out, const float * in, int ch, int in_len,
+void aa_downsample(float * out, const float * in, int ch, int in_len,
                            const float * filter, int filter_ch, int * olen) {
     int K = 12, stride = 2;
     int pad_left = K - 1; // 11
@@ -96,7 +96,7 @@ static void aa_downsample(float * out, const float * in, int ch, int in_len,
 // Full Activation1d (union of up + snakebeta + down)
 // buf_a/buf_b: temp buffers sized for upsampled output
 // filter_up/down: [1,1,12] for AMP (shared), [ch,1,12] for activation_post (per-channel)
-static void aa_snakebeta(float * x, int cur_len, int ch,
+void aa_snakebeta(float * x, int cur_len, int ch,
                           const float * alpha, const float * beta, bool logscale,
                           float * buf_up, float * buf_down, int max_up_len,
                           const float * filter_up = AA_FILTER,
@@ -145,7 +145,7 @@ static BigVGANTensor load_raw_st(SafeTensorsFile & sf, const char * name) {
 
 // ============ Causal Conv1d ============
 // Python causal Conv1d: pad(dil*(K-1), [0]) left-side → conv1d
-static void conv1d_causal(float * out, const float * in, int ic, int ilen,
+void conv1d_causal(float * out, const float * in, int ic, int ilen,
                           const float * w, const float * bias, int oc, int K, int dil=1) {
     int left_pad = dil * (K - 1);
     int padded_len = ilen + left_pad;
@@ -174,7 +174,7 @@ static void conv1d_causal(float * out, const float * in, int ic, int ilen,
 // ============ Causal ConvTranspose1d ============
 // Python causal: ConvTranspose1d(padding=0) → trim last stride samples
 // weight layout: [ic, oc, K] (PyTorch ConvTranspose1d native)
-static void convT1d_causal(float * out, const float * in, int ic, int ilen,
+void convT1d_causal(float * out, const float * in, int ic, int ilen,
                             const float * w, const float * bias, int oc, int stride, int K,
                             int * olen) {
     int olen_full = (ilen - 1) * stride + K; // padding=0
