@@ -19,6 +19,33 @@ float wn_scale(float g, const float * v, int n) {
     return g / norm;
 }
 
+// PyTorch-compatible causal Conv1d (forward sliding: pt = t + k)
+// Different from BigVGAN's backward-sliding conv!
+static void conv1d_causal_pt(float * out, const float * in, int C_in, int T,
+                              const float * w, const float * bias,
+                              int C_out, int K, int stride, int dilation) {
+    int left_pad = dilation * (K - 1);
+    int padded_T = T + left_pad;
+    float * padded = new float[C_in * padded_T]();
+    for (int c = 0; c < C_in; c++)
+        memcpy(padded + c * padded_T + left_pad, in + c * T, T * sizeof(float));
+    
+    int T_out = (T - 1) / stride + 1;
+    for (int o = 0; o < C_out; o++) {
+        float b = bias ? bias[o] : 0;
+        for (int t = 0; t < T_out; t++) {
+            float s = b;
+            for (int k = 0; k < K; k++) {
+                int pt = t * stride + k;  // FORWARD sliding
+                for (int c = 0; c < C_in; c++)
+                    s += padded[c * padded_T + pt] * w[(o * C_in + c) * K + k];
+            }
+            out[o * T_out + t] = s;
+        }
+    }
+    delete[] padded;
+}
+
 // Causal Conv1d with weight norm (weight_g + weight_v)
 // Layout: in is [C_in, T], out is [C_out, T_out]
 void causal_conv1d_wn(float * out, const float * in, int C_in, int T,
@@ -138,12 +165,12 @@ bool audiovae_encoder_load(const char * safetensors_path, AudioVAEEncoderWeights
                 // First conv (dilated): layers.d.2
                 snprintf(prefix, sizeof(prefix), "audio_encoder.generator.%d.layers.%d.2", rs_idx, d);
                 int oc1, ic1, k1;
-                load_wn_conv(sf, prefix, w.rs_w1_g[s][d], w.rs_w1_v[s][d], w.rs_b1[s][d], oc1, ic1, k1);
+                load_wn_conv(sf, prefix, w.rs_w1_v[s][d], w.rs_b1[s][d], oc1, ic1, k1);
                 
                 // Second conv (undilated): layers.d.5
                 snprintf(prefix, sizeof(prefix), "audio_encoder.generator.%d.layers.%d.5", rs_idx, d);
                 int oc2, ic2, k2;
-                load_wn_conv(sf, prefix, w.rs_w2_g[s][d], w.rs_w2_v[s][d], w.rs_b2[s][d], oc2, ic2, k2);
+                load_wn_conv(sf, prefix, w.rs_w2_v[s][d], w.rs_b2[s][d], oc2, ic2, k2);
             }
         } else {
             // Output conv (stage 6): 768→128
@@ -186,7 +213,7 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
     int C_pre = 12;
     int T_pre = T; // stride=1
     float * pre_out = new float[C_pre * T_pre];
-    causal_conv1d_wn(pre_out, audio, 1, T, w.pre_conv_wg, w.pre_conv_wv, w.pre_conv_bias, 12, 3, 1, 1);
+    conv1d_causal_pt(pre_out, audio, 1, T, w.pre_conv_wv, w.pre_conv_bias, 12, 3, 1, 1);
     { float rms=0; for(int i=0;i<12*T;i++) rms+=pre_out[i]*pre_out[i];
       printf("  enc pre-conv: rms=%.4f\n", sqrtf(rms/(12*T))); }
     leaky_relu(pre_out, C_pre * T_pre);
@@ -208,8 +235,8 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
         new_T = (cur_T - 1) / stride + 1;
         
         float * conv_out = new float[out_C * new_T];
-        causal_conv1d_wn(conv_out, cur, in_C, cur_T,
-                         w.stage_conv_wg[s], w.stage_conv_wv[s], w.stage_conv_bias[s],
+        conv1d_causal_pt(conv_out, cur, in_C, cur_T,
+                         w.stage_conv_wv[s], w.stage_conv_bias[s],
                          out_C, K, stride, 1);
         
         // ResStack: 6 dilated residual blocks
@@ -229,14 +256,14 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
             
             // First part: LeakyReLU + dilated conv
             leaky_relu(residual, out_C * new_T);
-            causal_conv1d_wn(tmp, residual, out_C, new_T,
-                            w.rs_w1_g[s][d], w.rs_w1_v[s][d], w.rs_b1[s][d],
+            conv1d_causal_pt(tmp, residual, out_C, new_T,
+                            w.rs_w1_v[s][d], w.rs_b1[s][d],
                             out_C, 3, 1, dil);
             
             // LeakyReLU + undilated conv
             leaky_relu(tmp, out_C * new_T);
-            causal_conv1d_wn(tmp, tmp, out_C, new_T,
-                            w.rs_w2_g[s][d], w.rs_w2_v[s][d], w.rs_b2[s][d],
+            conv1d_causal_pt(tmp, tmp, out_C, new_T,
+                            w.rs_w2_v[s][d], w.rs_b2[s][d],
                             out_C, 3, 1, 1);
             
             // Residual: conv_out = residual + block_output
@@ -264,8 +291,8 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
     // Use out_conv from the weights
     {
         // The output weight is [128, 768, 5] — K=5, stride=1
-        causal_conv1d_wn(final_out, cur, cur_C, cur_T,
-                         w.out_conv_wg, w.out_conv_wv, w.out_conv_bias,
+        conv1d_causal_pt(final_out, cur, cur_C, cur_T,
+                         w.out_conv_wv, w.out_conv_bias,
                          128, 5, 1, 1);
     }
     
