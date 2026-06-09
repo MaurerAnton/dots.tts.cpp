@@ -4,7 +4,7 @@ First C++ implementation of [dots.tts](https://github.com/rednote-hilab/dots.tts
 
 **Status: Active development / testing & polishing** — The full pipeline (BPE → LLM → PatchEncoder → DiT → VAE → BigVGAN) is implemented end-to-end. Currently refining output quality, verifying against the Python reference, and polishing the codebase.
 
-**Phase 1 MVP** — DiT + Flow Matching + PatchEncoder compile, build graphs, and execute correctly on CPU via ggml.
+**Current backend: CPU (ggml)** — All inference runs on CPU for now. GPU backends (Vulkan, ROCm, CUDA, Metal) are coming soon — the architecture is backend-agnostic and will support ggml Vulkan/CUDA/ROCm backends out of the box once the CPU pipeline is stable.
 
 ## Architecture
 
