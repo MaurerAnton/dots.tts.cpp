@@ -161,9 +161,9 @@ Numerical calibration against Python reference is ongoing:
 
 | Component | Frames | Correlation vs Py | Status |
 |-----------|--------|-------------------|--------|
-| **BigVGAN decoder** | 30720/30720 ✓ | -0.61 | Gain + AMP calibration needed |
-| **AudioVAE encoder** | 25/25 ✓ | -0.01 | WeightNorm + ResStack calibration needed |
-| **DiT flow matching** | runs | — | Conditioned inference (not random noise) needed |
+| **BigVGAN decoder** | 30720/30720 ✓ | **+0.985** | Calibrated — weight_norm fix applied |
+| **AudioVAE encoder** | 25/25 ✓ | -0.01 | Weight_norm calibration needed |
+| **DiT flow matching** | runs | — | Conditioned inference needed |
 | **CAM++** | 512-dim ✓ | — | Speaker embedding extraction works |
 | **LLM + PatchEncoder** | runs ✓ | — | Autoregressive feedback loop works |
 
