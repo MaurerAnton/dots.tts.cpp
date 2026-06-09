@@ -30,11 +30,11 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 | **LLM** (Qwen2.5-1.5B-Base) | 28 | 1536 | 1,545,672,706 | Via llama.cpp |
 | **DiT** (AR flow-matching head) | 18 | 1024 | 346,920,320 | Done |
 | **PatchEncoder** (semantic encoder) | 24 | 1024 | 305,498,752 | Done |
-| **BigVGAN decoder** | 6 stages, 18 AMP blocks | — | 136,509,072 | Done |
-| **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | Done |
+| **BigVGAN decoder** | 6 stages, 18 AMP blocks | 24–1536 | 136,509,072 | Done |
+| **AudioVAE encoder** | 7 Conv1d stages | 12–768 | 44,360,140 | Done |
 | **CAM++** (speaker encoder) | 53 D-TDNN | 512 | 7,259,203 | Done |
 | **BPE Tokenizer** | — | [vocab=151,672](models/token_vocab.txt#L151672) | — | Via llama.cpp |
-| **Total** | | | **2,386,220,193** | |
+| **Total** | 6/6 components | — | **2,386,220,193** | |
 
 ### DiT (flow-matching head)
 
