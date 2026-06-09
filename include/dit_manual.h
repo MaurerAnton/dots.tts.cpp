@@ -146,12 +146,27 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
     float * fw1=tensor_data(block.ffn_w1), * fw2=tensor_data(block.ffn_w2);
     float * fb1=block.ffn_b1?tensor_data(block.ffn_b1):nullptr, * fb2=block.ffn_b2?tensor_data(block.ffn_b2):nullptr;
     for(int t=0;t<n_tokens;t++){ manual_linear(fh1+t*DIT_FFN_SIZE, mod+t*hidden, fw1, fb1, hidden, DIT_FFN_SIZE);
-        for(int i=0;i<DIT_FFN_SIZE;i++){ float xv=fh1[t*DIT_FFN_SIZE+i]; fh1[t*DIT_FFN_SIZE+i]=xv/(1.0f+expf(-xv)); }
-        manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden); }
+        static int dc7=0; if(dc7==0){
+            float r=0; for(int i=0;i<DIT_FFN_SIZE;i++) r+=fh1[i]*fh1[i];
+            fprintf(stderr,"  fc1_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/DIT_FFN_SIZE), fh1[0], fh1[1], fh1[2]);
+        } dc7++;
+        for(int i=0;i<DIT_FFN_SIZE;i++){ float xv=fh1[t*DIT_FFN_SIZE+i];
+            // GELU: x * Phi(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+            float x2=xv*xv, x3=x2*xv;
+            fh1[t*DIT_FFN_SIZE+i]=0.5f*xv*(1.0f+tanhf(0.7978845608f*(xv+0.044715f*x3))); }
+        static int dc8=0; if(dc8==0){
+            float r=0; for(int i=0;i<DIT_FFN_SIZE;i++) r+=fh1[i]*fh1[i];
+            fprintf(stderr,"  silu_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/DIT_FFN_SIZE), fh1[0], fh1[1], fh1[2]);
+        } dc8++;
+        manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden);
+        static int dc9=0; if(dc9==0){
+            float r=0; for(int i=0;i<hidden;i++) r+=fh2[i]*fh2[i];
+            fprintf(stderr,"  fc2_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), fh2[0], fh2[1], fh2[2]);
+        } dc9++; }
     for(int i=0;i<n_tokens*hidden;i++) out[i]=h[i]+gml[i%hidden]*fh2[i];
     { static int dcnt5=0; if(dcnt5==0){
         float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=fh2[i]*fh2[i];
-        fprintf(stderr,"  ffn_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), fh2[0], fh2[1], fh2[2]);
+            fprintf(stderr,"  ffn_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), fh2[0], fh2[1], fh2[2]);
     } dcnt5++; }
     // CLEANUP
     delete[] cs; delete[] adaln_raw;
