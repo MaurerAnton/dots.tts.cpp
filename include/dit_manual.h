@@ -81,12 +81,24 @@ inline void manual_attention(float * out, const float * x,
             vh[t*head_dim+d]=v[t*hidden+h*head_dim+d]; }
         for (int t=0;t<n_tokens;t++) { manual_rms_norm(qh+t*head_dim, qh+t*head_dim, qnw, head_dim);
             manual_rms_norm(kh+t*head_dim, kh+t*head_dim, knw, head_dim); }
+        static int dcnt2=0; if(dcnt2==0 && h==0){
+            float r=0; for(int i=0;i<n_tokens*head_dim;i++) r+=qh[i]*qh[i];
+            fprintf(stderr,"  qh0_norm: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*head_dim)), qh[0], qh[1], qh[2]);
+        } dcnt2++;
         manual_rope(qh, kh, n_tokens, head_dim);
+        static int dcnt=0; if(dcnt==0 && h==0){
+            float r=0; for(int i=0;i<n_tokens*head_dim;i++) r+=qh[i]*qh[i];
+            fprintf(stderr,"  qh0_rope: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*head_dim)), qh[0], qh[1], qh[2]);
+        } dcnt++;
         float scale=1.0f/sqrtf((float)head_dim);
         for(int i=0;i<n_tokens;i++){ for(int j=0;j<n_tokens;j++){ float s=0;
             for(int d=0;d<head_dim;d++) s+=qh[i*head_dim+d]*kh[j*head_dim+d]; scores[i*n_tokens+j]=s*scale; }
             for(int j=i+1;j<n_tokens;j++) scores[i*n_tokens+j]=-INFINITY;
             manual_softmax(scores+i*n_tokens,n_tokens); }
+        static int dcnt3=0; if(dcnt3==0 && h==0){
+            fprintf(stderr,"  scores_h0 row0: [%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                scores[0],scores[1],scores[2],scores[3],scores[4],scores[5],scores[6],scores[7]);
+        } dcnt3++;
         for(int i=0;i<n_tokens;i++) for(int d=0;d<head_dim;d++){ float s=0;
             for(int j=0;j<n_tokens;j++) s+=scores[i*n_tokens+j]*vh[j*head_dim+d]; ao_flat[i*hidden+h*head_dim+d]=s; }
         delete[] qh; delete[] kh; delete[] vh;
@@ -95,6 +107,10 @@ inline void manual_attention(float * out, const float * x,
     // O projection (per-token)
     for (int t = 0; t < n_tokens; t++)
         manual_linear(out + t*hidden, ao_flat + t*hidden, ow, ob, hidden, hidden);
+    { static int dcnt4=0; if(dcnt4==0){
+        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=out[i]*out[i];
+        fprintf(stderr,"  attn_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), out[0], out[1], out[2]);
+    } dcnt4++; }
     delete[] q; delete[] k; delete[] v; delete[] ao_flat;
 }
 
@@ -120,6 +136,10 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
         n_tokens,hidden,DIT_NUM_HEADS,DIT_HEAD_SIZE);
     float * h = new float[n_tokens*hidden];
     for(int i=0;i<n_tokens*hidden;i++) h[i]=x_in[i]+gm[i%hidden]*ao[i];
+    { static int dcnt6=0; if(dcnt6==0){
+        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=h[i]*h[i];
+        fprintf(stderr,"  after_attn: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), h[0], h[1], h[2]);
+    } dcnt6++; }
     for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, h+t*hidden, hidden);
         for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scl[i])+sml[i]; }
     float * fh1 = new float[n_tokens*DIT_FFN_SIZE], * fh2 = new float[n_tokens*hidden];
@@ -129,27 +149,11 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
         for(int i=0;i<DIT_FFN_SIZE;i++){ float xv=fh1[t*DIT_FFN_SIZE+i]; fh1[t*DIT_FFN_SIZE+i]=xv/(1.0f+expf(-xv)); }
         manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden); }
     for(int i=0;i<n_tokens*hidden;i++) out[i]=h[i]+gml[i%hidden]*fh2[i];
-    // DEBUG
-    { static int cnt=0; if(cnt==0){
-        float r=0;
-        fprintf(stderr,"  manual_x_in: first10=[%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f]\n",
-            x_in[0], x_in[1], x_in[2], x_in[3], x_in[4], x_in[5], x_in[6], x_in[7], x_in[8], x_in[9]);
-        for(int i=0;i<n_tokens*hidden;i++) r+=normed[i]*normed[i];
-        fprintf(stderr,"  manual_normed: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/(n_tokens*hidden)), normed[0], normed[1], normed[2]);
-        r=0; for(int i=0;i<hidden;i++) r+=sm[i]*sm[i];
-        fprintf(stderr,"  manual_shift: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/hidden), sm[0], sm[1], sm[2]);
-        r=0; for(int i=0;i<hidden;i++) r+=scm[i]*scm[i];
-        fprintf(stderr,"  manual_scale: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/hidden), scm[0], scm[1], scm[2]);
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=mod[i]*mod[i];
-        fprintf(stderr,"  manual_mod: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/(n_tokens*hidden)), mod[0], mod[1], mod[2]);
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=ao[i]*ao[i];
-        fprintf(stderr,"  manual_attn: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/(n_tokens*hidden)), ao[0], ao[1], ao[2]);
-    } cnt++; }
+    { static int dcnt5=0; if(dcnt5==0){
+        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=fh2[i]*fh2[i];
+        fprintf(stderr,"  ffn_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), fh2[0], fh2[1], fh2[2]);
+    } dcnt5++; }
+    // CLEANUP
     delete[] cs; delete[] adaln_raw;
     delete[] normed; delete[] mod; delete[] ao; delete[] h; delete[] fh1; delete[] fh2;
 }
