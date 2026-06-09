@@ -63,10 +63,20 @@ static ggml_tensor * dit_ffn(
     ggml_tensor * b2        // [hidden]
 ) {
     ggml_tensor * h = ggml_mul_mat(ctx, w1, x);
-    if (b1) h = ggml_add(ctx, h, b1);
+    if (b1) {
+        int n = b1->ne[0];
+        ggml_tensor * b1_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
+        memcpy(b1_copy->data, b1->data, n * sizeof(float));
+        h = ggml_add(ctx, h, b1_copy);
+    }
     h = ggml_silu(ctx, h);
     h = ggml_mul_mat(ctx, w2, h);
-    if (b2) h = ggml_add(ctx, h, b2);
+    if (b2) {
+        int n = b2->ne[0];
+        ggml_tensor * b2_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
+        memcpy(b2_copy->data, b2->data, n * sizeof(float));
+        h = ggml_add(ctx, h, b2_copy);
+    }
     return h;
 }
 
@@ -446,6 +456,14 @@ static ggml_tensor * dit_block_forward_simple(
     h = ggml_add(ctx, h, shift_mlp_tok);
 
     ggml_tensor * ffn = dit_ffn(ctx, h, block.ffn_w1, block.ffn_w2, block.ffn_b1, block.ffn_b2);
+    // Dump first bias values
+    { static int done=0; if(!done && block.ffn_b1) { done=1;
+        float *d=(float*)block.ffn_b1->data; 
+        FILE* f=fopen("debug/dit_ffn_b1.bin","wb"); if(f){fwrite(d,sizeof(float),4096,f);fclose(f);}
+        d=(float*)block.ffn_b2->data;
+        f=fopen("debug/dit_ffn_b2.bin","wb"); if(f){fwrite(d,sizeof(float),1024,f);fclose(f);}
+        printf("  DiT FFN bias dumped\\n");
+    } }
     x = ggml_add(ctx, x, ggml_mul(ctx, gate_mlp_tok, ffn));
 
     return x;
@@ -497,7 +515,11 @@ ggml_tensor * dit_forward(
     // Input layer (Linear before DiT blocks)
     if (model.input_layer_w) {
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
-        if (model.input_layer_b) x = ggml_add(ctx, x, model.input_layer_b);
+        if (model.input_layer_b) {
+            ggml_tensor * b_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE);
+            memcpy(b_copy->data, model.input_layer_b->data, DIT_HIDDEN_SIZE * sizeof(float));
+            x = ggml_add(ctx, x, b_copy);
+        }
     if (dump) dump->add("dit_input_layer", x);
     }
 
