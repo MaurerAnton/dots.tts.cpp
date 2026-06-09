@@ -29,6 +29,8 @@ static const float VAE_STD[128] = {3.0316,2.8055,1.7751,1.7465,2.0646,1.9869,2.2
 bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m);
 bool load_patchenc_weights(SafeTensorsFile & sf, ggml_context * w_ctx, patch_encoder & enc);
 bool extract_embeddings(const char * gguf_path, const char * out_path);
+void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_val,
+    const float * speaker_emb, float * out);
 static float * tensor_data(ggml_tensor * t) { return (float *)((char *)t->data + t->view_offs); }
 static double now_ms() { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec*1000.0 + ts.tv_nsec/1000000.0; }
 static float randn() { float u1=(float)rand()/RAND_MAX,u2=(float)rand()/RAND_MAX; if(u1<1e-6f)u1=1e-6f; return sqrtf(-2.0f*logf(u1))*cosf(2.0f*3.14159f*u2); }
@@ -157,26 +159,23 @@ int main(int argc, char ** argv) {
             int cur_n_tok = n_tok + call, cond_seq = cur_n_tok + history_len + patch_size;
             if (cond_seq < 8) cond_seq = 8;
             int noise_pos = cur_n_tok + history_len;
-            ggml_reset(gctx);
-            ggml_tensor * dx = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
-            { float * dd = tensor_data(dx); memset(dd, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
-              if (cur_n_tok > 0) memcpy(dd, cond_llm_data, cur_n_tok * DIT_HIDDEN_SIZE * sizeof(float));
+            // Build input in plain array (no ggml)
+            float * dx_data = new float[cond_seq * DIT_HIDDEN_SIZE];
+            { memset(dx_data, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
+              if (cur_n_tok > 0) memcpy(dx_data, cond_llm_data, cur_n_tok * DIT_HIDDEN_SIZE * sizeof(float));
               if (dit.latent_proj_w && history_len > 0) { float * lw = tensor_data(dit.latent_proj_w);
-                  for (int h = 0; h < history_len; h++) { float * op = dd + (cur_n_tok + h) * DIT_HIDDEN_SIZE, * hv = history_latents + h * latent_dim;
+                  for (int h = 0; h < history_len; h++) { float * op = dx_data + (cur_n_tok + h) * DIT_HIDDEN_SIZE, * hv = history_latents + h * latent_dim;
                       for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[k * 1024 + j]; op[j] = s; } } }
-              for (int i = 0; i < patch_size; i++) { float * op = dd + (noise_pos + i) * DIT_HIDDEN_SIZE;
+              for (int i = 0; i < patch_size; i++) { float * op = dx_data + (noise_pos + i) * DIT_HIDDEN_SIZE;
                   if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
                       for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[k * 1024 + j]; op[j] = s; } } }
-              for (int p = 0; p < cond_seq; p++) { float * pos = dd + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
+              for (int p = 0; p < cond_seq; p++) { float * pos = dx_data + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
-            dx = ggml_cont(gctx, ggml_permute(gctx, dx, 2, 1, 0, 3));
-            ggml_tensor * ti = ggml_new_tensor_1d(gctx, GGML_TYPE_F32, 1); ((float*)ti->data)[0] = t;
-            ggml_tensor * spk = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, 512, 1); memcpy(tensor_data(spk), spk_emb, 512 * sizeof(float));
-            ggml_tensor * dout = dit_forward(dit, gctx, dx, ti, spk);
-            { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
-            float * vdata = tensor_data(dout); bool has_nan = false;
-            // Extract velocity for noise positions (noise_pos .. noise_pos+patch_size-1)
-            // vdata layout: [VAE_LATENT_DIM=128, cond_seq] = [ch * cond_seq + t]
+            // Call manual DiT forward
+            float * out_data = new float[cond_seq * VAE_LATENT_DIM];
+            dit_forward_raw(dit, dx_data, cond_seq, t, spk_emb, out_data);
+            float * vdata = out_data; bool has_nan = false;
+            // Extract velocity for noise positions
             for (int p = 0; p < patch_size; p++) {
                 int t_idx = noise_pos + p;
                 for (int c = 0; c < VAE_LATENT_DIM; c++) {
@@ -185,20 +184,20 @@ int main(int argc, char ** argv) {
                     if (std::isnan(val) || std::isinf(val)) has_nan = true;
                 }
             }
+            delete[] dx_data; delete[] out_data;
             if (has_nan) { printf("(NaN) "); for (int i=0;i<patch_flat;i++){float z=randn();if(z>5)z=5;if(z<-5)z=-5;z_t[i]=z;} history_len=0; break; }
             // CFG: blend with null-conditioning velocity for better quality
             if (cfg_scale > 1.001f && dit.hidden_proj_b && !has_nan) {
-                ggml_tensor * dx_null = ggml_new_tensor_3d(gctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, 1, cond_seq);
-                { float * dd = tensor_data(dx_null); memset(dd, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
+                float * dx_null = new float[cond_seq * DIT_HIDDEN_SIZE];
+                { memset(dx_null, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
                   float * bd = (float*)((char*)dit.hidden_proj_b->data + dit.hidden_proj_b->view_offs);
-                  for (int p = 0; p < cur_n_tok + history_len; p++) memcpy(dd + p * DIT_HIDDEN_SIZE, bd, DIT_HIDDEN_SIZE * sizeof(float));
-                  for (int i = 0; i < patch_size; i++) { float * op = dd + (noise_pos + i) * DIT_HIDDEN_SIZE;
+                  for (int p = 0; p < cur_n_tok + history_len; p++) memcpy(dx_null + p * DIT_HIDDEN_SIZE, bd, DIT_HIDDEN_SIZE * sizeof(float));
+                  for (int i = 0; i < patch_size; i++) { float * op = dx_null + (noise_pos + i) * DIT_HIDDEN_SIZE;
                       if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
                           for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[k * 1024 + j]; op[j] = s; } } } }
-                dx_null = ggml_cont(gctx, ggml_permute(gctx, dx_null, 2, 1, 0, 3));
-                ggml_tensor * dout_null = dit_forward(dit, gctx, dx_null, ti, spk);
-                { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout_null); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
-                float * vnull = tensor_data(dout_null);
+                float * out_null = new float[cond_seq * VAE_LATENT_DIM];
+                dit_forward_raw(dit, dx_null, cond_seq, t, spk_emb, out_null);
+                float * vnull = out_null;
                 for (int p = 0; p < patch_size; p++) {
                     int t_idx = noise_pos + p;
                     for (int c = 0; c < VAE_LATENT_DIM; c++) {
@@ -206,6 +205,7 @@ int main(int argc, char ** argv) {
                         v_t[p * VAE_LATENT_DIM + c] = vn + cfg_scale * (v_t[p * VAE_LATENT_DIM + c] - vn);
                     }
                 }
+                delete[] dx_null; delete[] out_null;
             }
             { float vr=0; for(int i=0;i<patch_flat;i++) vr+=v_t[i]*v_t[i]; vr=sqrtf(vr/patch_flat); float mv=15.0f, vs=(vr>mv)?(mv/vr):1.0f;
               for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*vs*dt;if(z_t[i]>50)z_t[i]=50;if(z_t[i]<-50)z_t[i]=-50;} }
@@ -215,6 +215,7 @@ int main(int argc, char ** argv) {
         for (int i = 0; i < latent_dim; i++) { float v = z_t[i]; if(v>5)v=5; if(v<-5)v=-5; history_latents[history_len*latent_dim+i] = v; }
         history_len++; total_frames += frames_per_call;
 
+        ggml_reset(gctx);  // needed for PatchEncoder ggml graph
         if (pe.in_proj_w && call < n_calls - 1) {
             ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
             memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));

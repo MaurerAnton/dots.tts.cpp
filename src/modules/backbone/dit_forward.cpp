@@ -34,76 +34,41 @@ static void compute_speaker_manual(dit_model & model, const float * speaker_emb,
     for (int i = 0; i < 1024; i++) { float x = (temp[i] - mean) * inv_std; if (ln_w) x *= ln_w[i]; if (ln_b) x += ln_b[i]; out[i] = x; }
 }
 
-// dit_forward: takes raw float arrays for input, timestep, speaker. Returns velocity field.
-// x: [seq_len, DIT_HIDDEN_SIZE] — row-major (seq_len tokens, each DIT_HIDDEN_SIZE features)
-// t: scalar timestep in [0, 1]
-// speaker_emb: [512] or nullptr
-// out: [seq_len, VAE_LATENT_DIM] — velocity field
 void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_val,
-    const float * speaker_emb, float * out)
-{
+    const float * speaker_emb, float * out) {
     int hidden = DIT_HIDDEN_SIZE, n_tokens = seq_len;
-
-    // Time embedding + speaker
     float cond[1024];
     compute_time_embedding_manual(model, t_val, cond);
-    if (speaker_emb) {
-        float spk_vals[1024]; compute_speaker_manual(model, speaker_emb, spk_vals);
-        for (int i = 0; i < 1024; i++) cond[i] += spk_vals[i];
-    }
-
-    // Input layer
+    if (speaker_emb) { float spk_vals[1024]; compute_speaker_manual(model, speaker_emb, spk_vals);
+        for (int i = 0; i < 1024; i++) cond[i] += spk_vals[i]; }
     float * h = new float[n_tokens * hidden];
-    fprintf(stderr, "  DEBUG input_layer start\n");
-    float * iw = tensor_data(model.input_layer_w);
-    float * ib = model.input_layer_b ? tensor_data(model.input_layer_b) : nullptr;
-    for (int t = 0; t < n_tokens; t++)
-        manual_linear(h + t*hidden, x + t*hidden, iw, ib, hidden, hidden);
-
-    // 18 DiT blocks (ping-pong between two buffers)
+    float * iw = tensor_data(model.input_layer_w); float * ib = model.input_layer_b ? tensor_data(model.input_layer_b) : nullptr;
+    for (int t = 0; t < n_tokens; t++) manual_linear(h + t*hidden, x + t*hidden, iw, ib, hidden, hidden);
     float * block_out = new float[n_tokens * hidden];
     for (int i = 0; i < model.n_layers; i++) {
         manual_dit_block(h, cond, model.layers[i], block_out, n_tokens);
         float * tmp = h; h = block_out; block_out = tmp;
     }
-
-    // Output layer
     float cs[1024]; for(int i=0;i<1024;i++) cs[i]=cond[i]/(1.0f+expf(-cond[i]));
-    float mod_raw[2 * DIT_HIDDEN_SIZE];
+    float mod_raw[2*DIT_HIDDEN_SIZE];
     { float * aw = tensor_data(model.out_adaln_w); float * ab = model.out_adaln_b ? tensor_data(model.out_adaln_b) : nullptr;
       for(int o=0;o<2*hidden;o++){ float s=ab?ab[o]:0.0f; for(int i=0;i<DIT_HIDDEN_SIZE;i++) s+=aw[o*DIT_HIDDEN_SIZE+i]*cs[i]; mod_raw[o]=s; } }
     float * shift = mod_raw, * scale = mod_raw + hidden;
     float * ln_out = new float[n_tokens * hidden];
-    for (int t = 0; t < n_tokens; t++) {
-        manual_layernorm(ln_out + t*hidden, h + t*hidden, hidden);
-        for (int i = 0; i < hidden; i++) ln_out[t*hidden+i] = ln_out[t*hidden+i] * (1.0f + scale[i]) + shift[i];
-    }
+    for (int t = 0; t < n_tokens; t++) { manual_layernorm(ln_out + t*hidden, h + t*hidden, hidden);
+        for (int i = 0; i < hidden; i++) ln_out[t*hidden+i] = ln_out[t*hidden+i] * (1.0f + scale[i]) + shift[i]; }
     float * ow = tensor_data(model.out_proj_w); float * ob = model.out_proj_b ? tensor_data(model.out_proj_b) : nullptr;
-    for (int t = 0; t < n_tokens; t++)
-        manual_linear(out + t*VAE_LATENT_DIM, ln_out + t*hidden, ow, ob, hidden, VAE_LATENT_DIM);
-
+    for (int t = 0; t < n_tokens; t++) manual_linear(out + t*VAE_LATENT_DIM, ln_out + t*hidden, ow, ob, hidden, VAE_LATENT_DIM);
     delete[] h; delete[] block_out; delete[] ln_out;
 }
 
-// ggml wrapper (for pipeline compatibility)
 ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
-    ggml_tensor * x, ggml_tensor * t, ggml_tensor * speaker_emb)
-{
-    int seq_len = x->ne[0], n_batch = x->ne[1];
-    int n_tokens = seq_len * n_batch;
-
-    fprintf(stderr, "DEBUG dit_forward: x ne=[%ld,%ld,%ld,%ld] n_tokens=%d\n",
-        x->ne[0], x->ne[1], x->ne[2], x->ne[3], n_tokens);
-
-    float * x_data = tensor_data(x);
-    float t_val = tensor_data(t)[0];
+    ggml_tensor * x, ggml_tensor * t, ggml_tensor * speaker_emb) {
+    int seq_len = x->ne[0], n_batch = x->ne[1], n_tokens = seq_len * n_batch;
+    float * x_data = tensor_data(x); float t_val = tensor_data(t)[0];
     float * spk_data = speaker_emb ? tensor_data(speaker_emb) : nullptr;
-
-    // Compute
     float * result_data = new float[n_tokens * VAE_LATENT_DIM];
     dit_forward_raw(model, x_data, n_tokens, t_val, spk_data, result_data);
-
-    // Return as ggml leaf tensor
     ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, VAE_LATENT_DIM, n_tokens);
     memcpy(tensor_data(result), result_data, n_tokens * VAE_LATENT_DIM * sizeof(float));
     delete[] result_data;
