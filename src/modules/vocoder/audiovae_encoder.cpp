@@ -12,7 +12,7 @@
 #include <string>
 
 // Weight norm: actual_weight = g * v / ||v||
-static float wn_scale(float g, const float * v, int n) {
+float wn_scale(float g, const float * v, int n) {
     float norm = 0;
     for (int i = 0; i < n; i++) norm += v[i] * v[i];
     norm = sqrtf(norm + 1e-12f);
@@ -21,7 +21,7 @@ static float wn_scale(float g, const float * v, int n) {
 
 // Causal Conv1d with weight norm (weight_g + weight_v)
 // Layout: in is [C_in, T], out is [C_out, T_out]
-static void causal_conv1d_wn(float * out, const float * in, int C_in, int T,
+void causal_conv1d_wn(float * out, const float * in, int C_in, int T,
                               const float * wg, const float * wv, const float * bias,
                               int C_out, int K, int stride, int dilation) {
     int left_pad = dilation * (K - 1);
