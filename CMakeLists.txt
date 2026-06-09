@@ -133,6 +133,17 @@ target_include_directories(test_dit_calib PRIVATE
 )
 target_link_libraries(test_dit_calib PRIVATE ggml pthread m)
 
+# ---- Manual block 0 test ----
+add_executable(test_manual_b0 test/test_manual_b0.cpp
+    src/utils/safetensors.cpp
+    src/utils/dit_loader.cpp)
+target_include_directories(test_manual_b0 PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_manual_b0 PRIVATE ggml pthread m)
+
 # ---- Test BigVGAN vs Python reference ----
 add_executable(test_bigvgan_cmp test/test_bigvgan_cmp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
 target_include_directories(test_bigvgan_cmp PRIVATE
