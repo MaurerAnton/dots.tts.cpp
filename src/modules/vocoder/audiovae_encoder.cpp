@@ -283,19 +283,31 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
         cur_C = out_C; cur_T = new_T;
     }
     
-    // Output conv: cur_C→128, K=3, stride=1 (using stage 6 = output layer)
-    // Actually the output is at index 20 with K=5 in the safetensors
-    // Let me use a separate output conv
+    // Output conv: 768→128, K=5, stride=1, NON-CAUSAL with pad=2
     int final_T = cur_T;
     float * final_out = new float[128 * final_T];
-    
-    // Output projection: look at generator.20
-    // Use out_conv from the weights
     {
-        // The output weight is [128, 768, 5] — K=5, stride=1
-        conv1d_causal_pt(final_out, cur, cur_C, cur_T,
-                         w.out_conv_wv, w.out_conv_bias,
-                         128, 5, 1, 1);
+        int ic=cur_C, oc=128, K=5, pad=2;
+        int padded_T = cur_T + 2*pad;
+        float *padded = new float[ic * padded_T]();
+        for(int c=0;c<ic;c++) {
+            memset(padded + c*padded_T, 0, pad*sizeof(float));
+            memcpy(padded + c*padded_T + pad, cur + c*cur_T, cur_T*sizeof(float));
+            memset(padded + c*padded_T + pad + cur_T, 0, pad*sizeof(float));
+        }
+        for(int o=0;o<oc;o++) {
+            float b = w.out_conv_bias ? w.out_conv_bias[o] : 0;
+            for(int t=0;t<cur_T;t++) {
+                float s = b;
+                for(int k=0;k<K;k++) {
+                    int pt = t + k;
+                    for(int c=0;c<ic;c++)
+                        s += padded[c*padded_T + pt] * w.out_conv_wv[(o*ic + c)*K + k];
+                }
+                final_out[o*cur_T + t] = s;
+            }
+        }
+        delete[] padded;
     }
     
     delete[] cur;
