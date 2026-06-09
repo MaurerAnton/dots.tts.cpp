@@ -1,78 +1,60 @@
 #!/usr/bin/env python3.12
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (C) 2026  Anton Maurer
-"""Export effective BigVGAN weights (after weight_norm) to safetensors for C++ calibration.
-
-PyTorch applies weight_norm during load_state_dict, transforming the stored weights.
-C++ loads raw weights from safetensors without weight_norm, causing ~30% RMS divergence.
-This script exports the EFFECTIVE weights (what PyTorch actually uses) as a new safetensors file.
-
-Usage: python3.12 export_eff_vocoder.py [output.safetensors]
-"""
-import sys, os, numpy as np, torch, json
+"""Export effective BigVGAN weights (weight_norm applied) for C++ calibration."""
+import sys, numpy as np, torch
 sys.path.insert(0, '/tmp/dots_tts_py/src')
 from dots_tts.modules.vocoder.bigvgan import AudioVAE
 from dots_tts.models.dots_tts.config import ModelConfig
-from safetensors.torch import save_file
+import json
+from safetensors.torch import save_file, load_file
 
 model_dir = '/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-soar/snapshots/1fd9452e55c2c9f38fe1a8ee09eaf7448c222d35'
-with open(f'{model_dir}/config.json') as f:
-    cfg = ModelConfig(**json.load(f))
-v = AudioVAE(cfg.vocoder).eval()
-
-from safetensors.torch import load_file
-v.load_state_dict(load_file(f'{model_dir}/vocoder.safetensors'), strict=False)
+with open(f'{model_dir}/config.json') as f: cfg = ModelConfig(**json.load(f))
+model = AudioVAE(cfg.vocoder).eval()
+model.load_state_dict(load_file(f'{model_dir}/vocoder.safetensors'), strict=False)
 
 out_path = sys.argv[1] if len(sys.argv) > 1 else 'models/vocoder_eff.safetensors'
 
-# Collect effective weights AND all parameters (alpha, beta, etc.)
-state = {}
-count = 0
-for name, module in v.named_modules():
-    if name == '': continue  # skip root
-    # Weight
-    if hasattr(module, 'weight') and module.weight is not None and not isinstance(module.weight, bool):
-        state[name + '.weight'] = module.weight.data.cpu()
-        count += 1
-    # Bias
-    if hasattr(module, 'bias') and module.bias is not None and not isinstance(module.bias, bool):
-        state[name + '.bias'] = module.bias.data.cpu()
-    # SnakeBeta/activation parameters
-    if hasattr(module, 'alpha') and module.alpha is not None:
-        state[name + '.alpha'] = module.alpha.data.cpu()
-        count += 1
-    if hasattr(module, 'beta') and module.beta is not None:
-        state[name + '.beta'] = module.beta.data.cpu()
-        count += 1
+sd = model.state_dict()
+weight_g_keys = {k for k in sd if k.endswith('.weight_g')}
 
-# Also include ALL named parameters (catches LSTM weights, etc.)
-for pname, param in v.named_parameters():
-    if pname not in state:
-        state[pname] = param.data.cpu()
-        count += 1
+eff_state = {}
 
-# And buffers (running_mean, running_var, etc.)
-for bname, buf in v.named_buffers():
-    if bname not in state:
-        state[bname] = buf.data.cpu()
-        count += 1
+# Process weight_norm modules: compute effective weight
+for gk in sorted(weight_g_keys):
+    base = gk[:-len('.weight_g')]
+    vk = base + '.weight_v'
+    bk = base + '.bias'
+    
+    w_g = sd[gk].cpu().numpy()
+    w_v = sd[vk].cpu().numpy()
+    
+    # norm along all dims except dim 0
+    axes = tuple(range(1, w_v.ndim))
+    norm_v = np.sqrt(np.sum(w_v**2, axis=axes, keepdims=True))
+    w_g_r = w_g.reshape(norm_v.shape)
+    eff_w = w_v * (w_g_r / (norm_v + 1e-12))
+    
+    eff_state[base + '.weight'] = torch.from_numpy(eff_w.astype(np.float32))
+    if bk in sd:
+        eff_state[bk] = sd[bk].cpu()
 
-save_file(state, out_path)
-print(f'Exported {count} effective tensors to {out_path}')
+# Copy non-weight_norm parameters
+for k, val in sd.items():
+    if k in eff_state: continue
+    if k.endswith('.weight_g') or k.endswith('.weight_v'): continue
+    eff_state[k] = val.cpu()
 
-# Verify: compare a key weight
-# Original raw weight RMS
-import struct
-with open(f'{model_dir}/vocoder.safetensors', 'rb') as f:
-    hlen = struct.unpack('<Q', f.read(8))[0]
-    h = json.loads(f.read(hlen))
-    ds = 8 + hlen
-    info = h['decoder.conv_pre.weight']
-    f.seek(ds + info['data_offsets'][0])
-    raw = np.frombuffer(f.read(info['data_offsets'][1]-info['data_offsets'][0]), dtype=np.float32)
-print(f'Original conv_pre.weight RMS: {np.sqrt(np.mean(raw**2)):.6f}')
+# Copy buffers
+for k, buf in model.named_buffers():
+    if k not in eff_state:
+        eff_state[k] = buf.cpu()
 
-# Effective weight RMS (from module)
-eff = v.decoder.conv_pre.weight.data.cpu().numpy()
-print(f'Effective conv_pre.weight RMS: {np.sqrt(np.mean(eff**2)):.6f}')
-print(f'Ratio: {np.sqrt(np.mean(eff**2))/np.sqrt(np.mean(raw**2)):.3f}')
+save_file(eff_state, out_path)
+print(f'Exported {len(eff_state)} tensors to {out_path}')
+
+# Verify
+eff_w = eff_state['decoder.ups.0.0.weight'].cpu().numpy()
+pt_eff = model.decoder.ups[0][0].weight.data.cpu().numpy()
+print(f'Export ups.0.0 RMS: {np.sqrt(np.mean(eff_w**2)):.6f}')
+print(f'PyTorch ups.0.0 RMS: {np.sqrt(np.mean(pt_eff**2)):.6f}')
+print(f'Match: {np.allclose(eff_w, pt_eff)}')
