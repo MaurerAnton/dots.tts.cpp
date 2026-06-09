@@ -3,11 +3,13 @@
 
 // dots.tts.cpp - Multi-head attention via ggml_flash_attn_ext
 // Proven approach used by llama.cpp. No manual loops, no NaN.
+// Now with Q/K/V/O bias support.
 
 #include "dots_tts.h"
 #include "dots_tts_util.h"
 #include "ggml.h"
 #include <cmath>
+#include <cstring>
 
 ggml_tensor * dit_attention_multihead(
     ggml_context * ctx,
@@ -16,6 +18,10 @@ ggml_tensor * dit_attention_multihead(
     ggml_tensor * k_weight,    // [hidden, hidden]
     ggml_tensor * v_weight,    // [hidden, hidden]
     ggml_tensor * o_weight,    // [hidden, hidden]
+    ggml_tensor * q_bias,      // [hidden] or nullptr
+    ggml_tensor * k_bias,      // [hidden] or nullptr
+    ggml_tensor * v_bias,      // [hidden] or nullptr
+    ggml_tensor * o_bias,      // [hidden] or nullptr
     int seq_len, int n_batch,
     int n_heads, int head_dim,
     ggml_tensor * q_norm_w, ggml_tensor * k_norm_w)
@@ -25,8 +31,11 @@ ggml_tensor * dit_attention_multihead(
 
     // QKV projections
     ggml_tensor * q = ggml_mul_mat(ctx, q_weight, x);
+    if (q_bias) q = ggml_add(ctx, q, q_bias);
     ggml_tensor * k = ggml_mul_mat(ctx, k_weight, x);
+    if (k_bias) k = ggml_add(ctx, k, k_bias);
     ggml_tensor * v = ggml_mul_mat(ctx, v_weight, x);
+    if (v_bias) v = ggml_add(ctx, v, v_bias);
     q = ggml_cont(ctx, q); k = ggml_cont(ctx, k); v = ggml_cont(ctx, v);
 
     // Reshape to [head_dim, n_heads, n_tokens] — format required by flash_attn
@@ -44,9 +53,7 @@ ggml_tensor * dit_attention_multihead(
     q = ggml_rope(ctx, q, pos, head_dim, 0);
     k = ggml_rope(ctx, k, pos, head_dim, 0);
 
-    // Permute for flash_attn: [head_dim, n_tokens, n_heads, 1]
-    // flash_attn expects Q,K,V in [head_dim, n_heads, n_tokens] or [head_dim, n_tokens, n_heads]
-    // Let's use [head_dim, n_tokens, n_heads] — llama.cpp uses this
+    // Permute for flash_attn: [head_dim, n_tokens, n_heads]
     q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
     k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
     v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
@@ -55,11 +62,12 @@ ggml_tensor * dit_attention_multihead(
     float scale = 1.0f / sqrtf((float)head_dim);
     ggml_tensor * attn = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
 
-    // Reshape back: [head_dim, n_tokens, n_heads] -> [head_dim * n_heads, n_tokens]
+    // Reshape back: [head_dim, n_tokens, n_heads] -> [hidden, n_tokens]
     attn = ggml_cont(ctx, ggml_permute(ctx, attn, 0, 2, 1, 3)); // [head_dim, n_heads, n_tokens]
     attn = ggml_reshape_2d(ctx, attn, hidden, n_tokens); // [hidden, n_tokens]
 
-    // Output projection
+    // Output projection + bias
     attn = ggml_mul_mat(ctx, o_weight, attn);
+    if (o_bias) attn = ggml_add(ctx, attn, o_bias);
     return attn;
 }

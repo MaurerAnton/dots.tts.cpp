@@ -16,6 +16,13 @@ bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m)
     m.n_layers = DIT_NUM_LAYERS;
     m.layers.resize(m.n_layers);
 
+    // Zero-initialize model-level pointers (resize() handles block-level)
+    m.t_embed_b1 = m.t_embed_b2 = nullptr;
+    m.spk_proj_b1 = m.spk_proj_b2 = nullptr;
+    m.out_adaln_b = nullptr;
+    m.out_proj_b = m.hidden_proj_b = m.latent_proj_b = m.coord_proj_b = nullptr;
+    m.input_layer_b = nullptr;
+
     auto load = [&](const char * sf_name, ggml_tensor * & field) -> bool {
         const st_tensor_info * info = sf.find(sf_name);
         if (!info) {

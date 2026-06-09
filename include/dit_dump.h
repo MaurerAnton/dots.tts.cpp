@@ -8,13 +8,14 @@
 #include <cmath>
 #include <cstring>
 
-#define DIT_DUMP_MAX 64
+#define DIT_DUMP_MAX 128
 
 struct dit_dump_slot {
-    const char * name;
+    char name[64];
     ggml_tensor * tensor;
     int n_elements;
     float * copy;  // captured copy of tensor data
+    dit_dump_slot() : tensor(nullptr), n_elements(0), copy(nullptr) { name[0] = '\0'; }
     ~dit_dump_slot() { delete[] copy; }
 };
 
@@ -27,7 +28,8 @@ struct dit_dump_ctx {
     
     void add(const char * name, ggml_tensor * t, int n = 0) {
         if (!enabled || count >= DIT_DUMP_MAX) return;
-        slots[count].name = name;
+        strncpy(slots[count].name, name, sizeof(slots[count].name) - 1);
+        slots[count].name[sizeof(slots[count].name) - 1] = '\0';
         slots[count].tensor = t;
         slots[count].n_elements = n;
         count++;

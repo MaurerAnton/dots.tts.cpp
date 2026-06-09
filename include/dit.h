@@ -128,7 +128,6 @@ bool dit_model_load(dit_model & model, ggml_context * ctx);
 // x: input sequence [seq_len, n_batch, hidden] — conditioning + noise targets
 // t: timestep [1, n_batch] — scalar in [0, 1]
 // speaker_emb: speaker x-vector [speaker_dim, n_batch] or nullptr for unconditional
-// returns: velocity field [seq_len, latent_dim]
 ggml_tensor * dit_forward(
     dit_model & model,
     ggml_context * ctx,
