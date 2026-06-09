@@ -152,6 +152,55 @@ The `models/` directory contains **offline tools** — no Python is needed at ru
 | `compare_pipelines.py` | Byte-level C++ vs Python verification |
 | `debug_dump.py` / `dump_amp.py` | Dump PyTorch intermediates for C++ debugging |
 
+## Verification Status
+
+All 6 model components compile and run end-to-end without NaN.
+Numerical calibration against Python reference is ongoing:
+
+| Component | Frames | Correlation vs Py | Status |
+|-----------|--------|-------------------|--------|
+| **BigVGAN decoder** | 30720/30720 ✓ | -0.61 | Gain + AMP calibration needed |
+| **AudioVAE encoder** | 25/25 ✓ | -0.01 | WeightNorm + ResStack calibration needed |
+| **DiT flow matching** | runs | — | Conditioned inference (not random noise) needed |
+| **CAM++** | 512-dim ✓ | — | Speaker embedding extraction works |
+| **LLM + PatchEncoder** | runs ✓ | — | Autoregressive feedback loop works |
+
+Pipeline produces audio output; quality refinement is the next phase.
+
+## C++ TTS Ecosystem
+
+Other actively maintained C++ TTS / voice cloning projects (2026):
+
+| Project | Stars | Backend | Voice Clone | Notes |
+|---------|-------|---------|-------------|-------|
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 12.9k | ONNX | ✓ ZipVoice | 50+ languages, 12 APIs, NPU |
+| [piper1-gpl](https://github.com/rhasspy/piper1-gpl) | 4.4k | ONNX | ✗ | 30+ languages, embedded |
+| [qwentts.cpp](https://github.com/nicktf/qwentts.cpp) | 34 | GGML | ✓ | Qwen3-TTS, zero-shot cloning |
+| [cosyvoice.cpp](https://github.com/nicktf/cosyvoice.cpp) | 26 | GGML | ✓ | CosyVoice3, OpenAI API server |
+| [TTS.cpp](https://github.com/nicktf/TTS.cpp) | 241 | GGML | ✗ | Multi-model PoC (Kokoro, Orpheus) |
+| [kokopop](https://github.com/nicktf/kokopop) | 6 | GGUF | ✗ | Kokoro-82M, clean runtime |
+| [bark.cpp](https://github.com/PABannier/bark.cpp) | 863 | GGML | ✓ | Stale since Nov 2024 |
+| [tortoise.cpp](https://github.com/baldram/tortoise.cpp) | 194 | GGML | ✓ | Stale since Aug 2024 |
+
+**dots.tts.cpp** is the only C++ project targeting **continuous autoregressive** TTS
+(not discrete tokens) with a **fully causal VAE** for streaming synthesis.
+
+## Architecture Lessons from KoboldCpp
+
+[KoboldCpp](https://github.com/LostRuins/koboldcpp) combines llama.cpp + stable-diffusion.cpp +
+Whisper + 6 TTS backends in one binary. Patterns applicable to dots.tts.cpp:
+
+- **Modular adapters** — each model type in its own static library, all sharing one ggml backend.
+  We already follow this: `dit_forward`, `patchenc`, `bigvgan_cpp`, `campp`, `audiovae_encoder`.
+- **GGUF with architecture auto-detection** — `gguf_get_model_arch()` routes to the right loader.
+  We currently load from separate safetensors; a unified `dots_tts.gguf` is a natural next step.
+- **Shared ggml backend with ref-counting** — one `ggml_backend` for DiT + PatchEncoder + BigVGAN
+  instead of separate contexts. Enables GPU offload for all components simultaneously.
+- **`ggml_extend.hpp`** — helper ops (attention, norms, activations) over raw ggml.
+  Our `dit_attention.cpp` and `conv1d_causal` could benefit from this pattern.
+- **Vulkan/CUDA backend** — KoboldCpp supports `GGML_USE_VULKAN` + `SD_USE_VULKAN`.
+  Dots.tts.cpp's DiT and PatchEncoder are already ggml-native and ready for GPU backends.
+
 ## License
 
 GNU General Public License v3.0 or later (SPDX: GPL-3.0-or-later).
