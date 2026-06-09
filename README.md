@@ -32,7 +32,7 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 | **PatchEncoder** (semantic encoder) | 24 | 1024 | 305,498,752 | Done |
 | **BigVGAN decoder** | 6 stages, 18 AMP blocks | — | 136,509,072 | Done |
 | **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | TODO |
-| **CAM++** (speaker encoder) | — | 512 | 7,259,203 | TODO |
+| **CAM++** (speaker encoder) | — | 512 | 7,259,203 | Done |
 | **BPE Tokenizer** | — | [vocab=151,672](models/token_vocab.txt#L151672) | — | Via llama.cpp |
 | **Total** | | | **2,386,220,193** | |
 
@@ -54,6 +54,15 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 - 6 upsampling stages, 3 SnakeBeta AMP blocks per stage
 - 1920-sample hop, 48 kHz output, SLSTM bottleneck (4 layers, hidden=512)
 
+### CAM++ (speaker encoder)
+
+- 3D-Speaker CAM++ architecture (Alibaba DAMO Academy, Apache 2.0)
+- Input: 16kHz PCM audio → FBank (80-dim mel) → 512-dim x-vector
+- FCM head: 2× Conv2d + 4× BasicResBlock (32→32, stride 2/2/2/1)
+- D-TDNN backbone: 3 blocks (12+24+16 CAMDenseTDNN layers), growth=32
+- CAM context aggregation + StatsPool → Dense projection
+- Frozen weights from `speaker_encoder.safetensors` (7,259,203 params)
+
 ## File Layout
 
 ```
@@ -71,6 +80,8 @@ dots.tts.cpp/
 │   │       ├── bigvgan_cpp.cpp  # BigVGAN decoder
 │   │       ├── audiovae.cpp     # AudioVAE wrapper
 │   │       └── lstm.cpp         # SLSTM bottleneck
+│   │   └── speaker/
+│   │       └── campp.cpp        # CAM++ speaker encoder
 │   └── utils/
 │       ├── safetensors.cpp      # safetensors parser
 │       ├── dit_loader.cpp       # DiT weight loader
@@ -79,6 +90,7 @@ dots.tts.cpp/
 │   ├── dots_tts.h               # Architecture constants
 │   ├── dit.h, patchenc.h        # DiT / PatchEncoder APIs
 │   ├── bigvgan_cpp.h, audiovae.h# Vocoder APIs
+│   ├── campp.h                  # CAM++ speaker encoder API
 │   ├── safetensors.h, gpt2_bpe_tokenizer.h
 │   └── ...
 ├── models/                      # Model conversion & verification tools (Python)

@@ -36,6 +36,7 @@ add_executable(e2e_pipeline
     src/utils/safetensors.cpp
     src/utils/dit_loader.cpp
     src/utils/patchenc_loader.cpp
+    src/modules/speaker/campp.cpp
 )
 target_include_directories(e2e_pipeline PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -86,3 +87,12 @@ target_link_libraries(test_llm PRIVATE ${LLAMA_LIB} ggml pthread m)
 add_executable(test_tokenizer test/test_tokenizer.cpp src/gpt2_bpe_tokenizer.cpp)
 target_include_directories(test_tokenizer PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_tokenizer PRIVATE pthread)
+
+# ---- Test CAM++ speaker encoder ----
+add_executable(test_campp test/test_campp.cpp src/modules/speaker/campp.cpp src/utils/safetensors.cpp)
+target_include_directories(test_campp PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_campp PRIVATE ggml pthread m)
