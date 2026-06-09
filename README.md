@@ -34,7 +34,7 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 | **AudioVAE encoder** | 7 Conv1d stages | 12–768 | 44,360,140 | Done |
 | **CAM++** (speaker encoder) | 53 D-TDNN | 512 | 7,259,203 | Done |
 | **BPE Tokenizer** | — | [vocab=151,672](models/token_vocab.txt#L151672) | — | Via llama.cpp |
-| **Total** | 70 attn + 53 D-TDNN + 31 conv | 24–1536 | **2,386,220,193** | |
+| **Total** | 70 attn + 53 D-TDNN + 31 conv | 12–1536 | **2,386,220,193** | |
 
 ### DiT (flow-matching head)
 
