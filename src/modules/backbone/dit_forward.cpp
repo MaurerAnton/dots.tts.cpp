@@ -455,7 +455,7 @@ ggml_tensor * dit_forward(
     ggml_context * ctx,
     ggml_tensor * x,           // [seq_len, n_batch, hidden]
     ggml_tensor * t,           // [n_batch] timestep
-    ggml_tensor * speaker_emb) // [speaker_dim, n_batch] or nullptr
+    ggml_tensor * speaker_emb, dit_dump_ctx * dump) // [speaker_dim, n_batch] or nullptr
 {
     int seq_len = x->ne[0];
     int n_batch = x->ne[1];
@@ -489,11 +489,13 @@ ggml_tensor * dit_forward(
     // Input layer (Linear before DiT blocks)
     if (model.input_layer_w) {
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
+    if (dump) dump->add("dit_input_layer", x);
     }
 
     static int dump_count = 0;
     for (int i = 0; i < model.n_layers; i++) {
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
+    if (dump && i == 0) dump->add("dit_block0", x);
         if (i == 0 && dump_count == 0) {
             dump_count++;
             ggml_cgraph * dgf = ggml_new_graph(ctx);
@@ -547,6 +549,7 @@ ggml_tensor * dit_forward(
         out = ggml_add(ctx, out, shift_tok);
     }
     out = ggml_mul_mat(ctx, model.out_proj_w, out);
+    if (dump) dump->add("dit_output", out);
 
     return out; // [latent_dim, n_tokens] = [VAE_LATENT_DIM, seq_len * n_batch]
 }

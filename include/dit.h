@@ -9,6 +9,7 @@
 
 #include "dots_tts.h"
 #include "ggml.h"
+#include "dit_dump.h"
 #include <vector>
 #include <string>
 
@@ -140,7 +141,7 @@ ggml_tensor * dit_forward(
     ggml_context * ctx,
     ggml_tensor * x,
     ggml_tensor * t,
-    ggml_tensor * speaker_emb);
+    ggml_tensor * speaker_emb, dit_dump_ctx * dump = nullptr);
 
 // timestep embedding: scalar t -> [ada_dim] sinusoidal
 ggml_tensor * dit_timestep_embedding(ggml_context * ctx, ggml_tensor * t, int dim);
