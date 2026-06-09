@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - DiT (Diffusion Transformer) implementation
 // Reference: rednote-hilab/dots.tts (Apache 2.0)
 // Pure ggml - no PyTorch, no ONNX, no Python runtime

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - Multi-head attention via ggml_flash_attn_ext
 // Proven approach used by llama.cpp. No manual loops, no NaN.
 

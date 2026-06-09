@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - AudioVAE decoder (simplified MVP)
 // For pipeline validation: manual upsampling, no learned conv layers
 

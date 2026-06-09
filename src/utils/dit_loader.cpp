@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - Load DiT weights from safetensors
 // Tensor name mapping: safetensors -> dit_model/dit_block fields
 

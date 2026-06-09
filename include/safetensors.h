@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 #pragma once
 
 // dots.tts.cpp - Minimal safetensors file loader

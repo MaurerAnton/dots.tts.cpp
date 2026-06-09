@@ -1,56 +1,109 @@
 # dots.tts.cpp
 
-First C++ implementation of [dots.tts](https://github.com/rednote-hilab/dots.tts) — a 2,386,220,193-parameter multilingual text-to-speech model with 24-language support (including Russian, English, German), zero-shot voice cloning, and 48kHz output.
+First C++ implementation of [dots.tts](https://github.com/rednote-hilab/dots.tts) — a 2,386,220,193-parameter multilingual text-to-speech model supporting 24 languages, with zero-shot voice cloning and 48 kHz output.
 
-**Status: Active development / testing & polishing** — The full pipeline (BPE → LLM → PatchEncoder → DiT → VAE → BigVGAN) is implemented end-to-end. Currently refining output quality, verifying against the Python reference, and polishing the codebase.
+**Status: Active development** — Full pipeline (BPE → LLM → PatchEncoder → DiT → VAE → BigVGAN) is end-to-end. Ongoing: quality refinement, byte-level verification against the Python reference.
 
-**Current backend: CPU (ggml)** — All inference runs on CPU for now. GPU backends (Vulkan, ROCm, CUDA, Metal) are coming soon — the architecture is backend-agnostic and will support ggml Vulkan/CUDA/ROCm backends out of the box once the CPU pipeline is stable.
+## Supported Languages (24)
+
+The 24 languages from the [MiniMax Multilingual benchmark](https://github.com/rednote-hilab/dots.tts#minimax-multilingual-24-languages):
+
+Arabic, Cantonese, Chinese, Czech, Dutch, English, Finnish, French, German,
+Greek, Hindi, Indonesian, Italian, Japanese, Korean, Polish, Portuguese,
+Romanian, Russian, Spanish, Thai, Turkish, Ukrainian, Vietnamese
 
 ## Architecture
 
 ```
-Text -> BPE Tokenizer -> Qwen2.5-1.5B LLM -> PatchEncoder
-     -> FM buffer -> DiT (flow matching) -> AudioVAE -> 48kHz WAV
+Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
+     → PatchEncoder → FM buffer → DiT (flow matching) → AudioVAE → 48kHz WAV
 ```
+
+> **LLM backbone**: Initialized from [Qwen2.5-1.5B-Base](https://github.com/rednote-hilab/dots.tts#-architecture).
+> "We initialize the LLM from Qwen2.5-1.5B Base and feed it text directly as BPE instead of phonemes."
+> — [arXiv:2606.07080](https://arxiv.org/abs/2606.07080), Section 2.3
 
 ### Components
 
-| Component | Layers | Hidden | Params | Status |
-|-----------|--------|--------|--------|--------|
-| **DiT** (flow-matching head) | 18 | 1024 | 346,920,320 | Done |
-| **PatchEncoder** (VAE semantic encoder) | 24 | 1024 | 305,498,752 | Done |
-| **Flow Matching ODE** (Euler, Midpoint, CFG) | - | - | - | Done |
-| **AudioVAE encoder** (7 Conv1d stages) | 7 | - | 44,360,140 | TODO |
-| **BigVGAN decoder** (6 upsampling + 18 AMP blocks) | 6 | - | 136,509,072 | Done |
-| **LLM backbone** (Qwen2.5-1.5B) | 28 | 1536 | 1,545,672,706 | Reuses llama.cpp |
-| **CAM++** (speaker encoder) | - | 512 | 7,259,203 | TODO |
-| **BPE Tokenizer** | - | vocab=151,936 | - | Reuses llama.cpp |
+| Component | Layers | Hidden | Params (exact) | Status |
+|-----------|--------|--------|----------------|--------|
+| **LLM** (Qwen2.5-1.5B-Base) | 28 | 1536 | 1,545,672,706 | Via llama.cpp |
+| **DiT** (AR flow-matching head) | 18 | 1024 | 346,920,320 | Done |
+| **PatchEncoder** (semantic encoder) | 24 | 1024 | 305,498,752 | Done |
+| **BigVGAN decoder** | 6 stages, 18 AMP blocks | — | 136,509,072 | Done |
+| **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | TODO |
+| **CAM++** (speaker encoder) | — | 512 | 7,259,203 | TODO |
+| **BPE Tokenizer** | — | vocab=151,936 | — | Via llama.cpp |
+| **Total** | | | **2,386,220,193** | |
 
-### What works now
+### DiT (flow-matching head)
 
-- 18-layer DiT with adaLN modulation (timestep + speaker x-vector -> shift/scale/gate)
-- Self-attention with RoPE and qk_norm
-- FFN with SiLU (1024 -> 4096 -> 1024)
-- 24-layer PatchEncoder with causal attention and streaming decode_step
-- Euler and Midpoint (RK2) ODE solvers with classifier-free guidance
-- Full ggml graph build and compute on CPU
-- Dummy weight loading for testing (random init)
+- 18 layers, hidden=1024, 16 heads, FFN=4096
+- adaLN modulation: timestep + speaker x-vector → shift/scale/gate
+- Self-attention with RoPE (theta=10000) and qk_norm
+- Predicts velocity field v_t; solved with Euler/Midpoint ODE + classifier-free guidance
 
-### Test output
+### PatchEncoder (VAE semantic encoder)
+
+- 24-layer causal Transformer, hidden=1024, FFN=4096
+- Downsampling: 25 Hz VAE latents → 6.25 Hz LLM tokens (4× compression)
+- Streaming decode_step for autoregressive generation
+
+### BigVGAN decoder
+
+- 6 upsampling stages, 3 SnakeBeta AMP blocks per stage
+- 1920-sample hop, 48 kHz output, SLSTM bottleneck (4 layers, hidden=512)
+
+## File Layout
 
 ```
-=== DiT forward pass ===
-Output: [128 x 32] min=-0.021282 max=0.018719 mean=0.000095
-
-=== PatchEncoder forward pass ===
-PatchEncoder output: [1536 x 4] min=-0.002728 max=0.002307 mean=-0.000006
-
-=== PatchEncoder streaming ===
-  patch 0: LLM emb mean=-0.000007
-  patch 1: LLM emb mean=0.000006
-  patch 2: LLM emb mean=-0.000008
-  patch 3: LLM emb mean=-0.000011
-PatchEncoder streaming: OK
+dots.tts.cpp/
+├── src/
+│   ├── e2e_pipeline.cpp         # End-to-end CLI
+│   ├── gpt2_bpe_tokenizer.cpp   # BPE tokenizer (GPT-2 / Mistral)
+│   ├── gguf_extract.cpp         # GGUF weight extraction utility
+│   ├── modules/
+│   │   ├── backbone/
+│   │   │   ├── dit_forward.cpp  # DiT forward pass
+│   │   │   ├── dit_attention.cpp# DiT self-attention
+│   │   │   └── patchenc.cpp     # PatchEncoder
+│   │   └── vocoder/
+│   │       ├── bigvgan_cpp.cpp  # BigVGAN decoder
+│   │       ├── audiovae.cpp     # AudioVAE wrapper
+│   │       └── lstm.cpp         # SLSTM bottleneck
+│   └── utils/
+│       ├── safetensors.cpp      # safetensors parser
+│       ├── dit_loader.cpp       # DiT weight loader
+│       └── patchenc_loader.cpp  # PatchEncoder weight loader
+├── include/                     # Public headers
+│   ├── dots_tts.h               # Architecture constants
+│   ├── dit.h, patchenc.h        # DiT / PatchEncoder APIs
+│   ├── bigvgan_cpp.h, audiovae.h# Vocoder APIs
+│   ├── safetensors.h, gpt2_bpe_tokenizer.h
+│   └── ...
+├── models/                      # Model conversion & verification tools (Python)
+│   ├── convert_dots_tts.py      # safetensors → GGUF (DiT+PatchEncoder)
+│   ├── extract_llm_gguf.py      # Qwen2.5 LLM → GGUF
+│   ├── extract_dots_llm.py      # Mistral LLM → GGUF (legacy)
+│   ├── debug_dump.py            # BigVGAN intermediate dump (reference)
+│   ├── dump_amp.py              # AMP block dump (reference)
+│   ├── vocoder_bridge.py        # C++ latents → Python vocoder → WAV
+│   ├── hybrid_tts.py            # Full Python dots.tts generation
+│   ├── tok.py                   # HuggingFace tokenizer test
+│   ├── decode_latents.py        # DiT latent decoder
+│   └── token_vocab.txt          # BPE vocabulary
+├── tools/                       # Auxiliary tools
+│   ├── compare_pipelines.py     # Byte-level C++ vs Python comparison
+│   ├── web_demo.py              # Flask web UI
+│   └── web_server.cpp           # C++ HTTP server
+├── test/                        # Test sources
+│   ├── test_llm.cpp             # LLM integration test
+│   ├── test_tokenizer.cpp       # BPE tokenizer test
+│   └── test_vocoder.cpp         # Vocoder test
+├── attic/                       # Old/experimental code
+├── CMakeLists.txt
+├── README.md
+└── LICENSE                      # GPL-3.0-or-later
 ```
 
 ## Build
@@ -61,16 +114,30 @@ cd dots.tts.cpp
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
-./dots_tts
+./e2e_pipeline "Hello world"
 ```
 
 Requires: C++17, CMake 3.18+, ggml (from llama.cpp)
 
+## Python Tools
+
+The `models/` directory contains **offline tools** — no Python is needed at runtime:
+
+| Tool | Purpose |
+|------|---------|
+| `convert_dots_tts.py` | Convert DiT+PatchEncoder safetensors → GGUF (one-time) |
+| `extract_llm_gguf.py` | Extract Qwen2.5 LLM → GGUF (one-time) |
+| `compare_pipelines.py` | Byte-level C++ vs Python verification |
+| `debug_dump.py` / `dump_amp.py` | Dump PyTorch intermediates for C++ debugging |
+
 ## License
 
-Apache 2.0 — same as upstream dots.tts
+GNU General Public License v3.0 or later (SPDX: GPL-3.0-or-later).
 
-## Reference
+See [LICENSE](LICENSE) for the full text. Copyright (C) 2026 Anton Maurer.
 
-- [rednote-hilab/dots.tts](https://github.com/rednote-hilab/dots.tts) — original Python implementation
+## References
+
+- [rednote-hilab/dots.tts](https://github.com/rednote-hilab/dots.tts) — original Python implementation (Apache 2.0)
+- [arXiv:2606.07080](https://arxiv.org/abs/2606.07080) — technical report
 - [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) — ggml tensor library

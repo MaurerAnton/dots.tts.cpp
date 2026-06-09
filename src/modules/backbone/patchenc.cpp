@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - PatchEncoder implementation
 // 24-layer causal streaming transformer encoder
 

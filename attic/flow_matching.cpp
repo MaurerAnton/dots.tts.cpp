@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - Flow Matching ODE solver
 // Solves dz/dt = v_theta(z_t, t | conditioning)
 // Starting from z_0 ~ N(0, I), ending at z_1 (generated latent patch)

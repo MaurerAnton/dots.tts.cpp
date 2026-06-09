@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - Pure C++ BigVGAN vocoder decoder (v2 — correct architecture)
 // Causal mode, snake_logscale, anti-alias up/down sampling, correct AMP blocks
 #include "dots_tts.h"
@@ -8,6 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // LSTM forward declaration
 void lstm_forward(const float * x, int seq_len, int hidden, int n_layers,
@@ -498,8 +504,8 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
     // Clamp to [-1, 1] (no tanh), then apply output gain
     float * fb = tmp;
-    // Apply gain to compensate for anti-alias filter attenuation
-    const float output_gain = 40.0f;
+    // Match Python BigVGAN output level (C++ conv/AMP has ~3.4x lower gain)
+    const float output_gain = 2.8f;
     for (int i = 0; i < final_len; i++) {
         fb[i] *= output_gain;
         if (fb[i] > 1.0f) fb[i] = 1.0f;

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // C LSTM implementation for dots.tts BigVGAN dec_mi_layer
 // Standard LSTM with 4 layers, hidden=512, skip connection
 #include <cmath>

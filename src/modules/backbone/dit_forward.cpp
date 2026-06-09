@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - DiT forward pass (simplified for ggml)
 // All operations use either:
 //   1. ggml_mul_mat for linear projections (2D: [out_features, batch*seq])

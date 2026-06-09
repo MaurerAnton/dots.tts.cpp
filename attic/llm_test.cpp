@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // Minimal LLM test — skip all dummy weights
 #include "llama.h"
 #include <cstdio>

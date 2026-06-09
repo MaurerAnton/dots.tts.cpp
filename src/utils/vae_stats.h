@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - VAE latent statistics (from latent_stats.pt)
 // Per-channel mean and variance of the VAE encoder output distribution
 // Used to normalize DiT latents to match the decoder's expected input

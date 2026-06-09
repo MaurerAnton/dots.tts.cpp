@@ -1,7 +1,12 @@
 build/
+debug/
 *.o
 *.so
 *.a
 models/*.gguf
 models/token_embd.bin
 models/dots_llm.gguf
+*.npy
+*.wav
+*.bin
+!models/token_vocab.txt

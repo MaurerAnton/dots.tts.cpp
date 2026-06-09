@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026  Anton Maurer
+
 // dots.tts.cpp - Safetensors loader implementation
 // Minimalist: no external JSON lib, no Python, just C++17 + stdio
 
