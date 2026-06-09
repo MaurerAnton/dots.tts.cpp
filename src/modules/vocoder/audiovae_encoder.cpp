@@ -11,6 +11,11 @@
 #include <vector>
 #include <string>
 
+// Use BigVGAN's LSTM
+extern void lstm_forward(const float * x, int seq_len, int hidden, int n_layers,
+    const float * w_ih[4], const float * w_hh[4],
+    const float * b_ih[4], const float * b_hh[4], float * out, bool skip);
+
 // Weight norm: actual_weight = g * v / ||v||
 float wn_scale(float g, const float * v, int n) {
     float norm = 0;
@@ -182,6 +187,48 @@ bool audiovae_encoder_load(const char * safetensors_path, AudioVAEEncoderWeights
     }
     
     sf.close();
+    
+    // Try to load enc_mi_layer + pre_proj from separate safetensors
+    std::string mi_path = std::string(safetensors_path);
+    size_t pos = mi_path.rfind("encoder_det");
+    if (pos != std::string::npos) {
+        mi_path.replace(pos, 11, "enc_mi_pre_proj");
+    } else {
+        mi_path = "models/enc_mi_pre_proj.safetensors";
+    }
+    SafeTensorsFile sf2;
+    if (sf2.open(mi_path.c_str())) {
+        // enc_mi_layer.0: Linear(128→512)
+        auto info = sf2.find("enc_mi_layer.0.weight");
+        if (info) { w.mi_w1 = new float[512*128]; sf2.load_raw(*info, w.mi_w1, 512*128); }
+        info = sf2.find("enc_mi_layer.0.bias");
+        if (info) { w.mi_b1 = new float[512]; sf2.load_raw(*info, w.mi_b1, 512); }
+        // LSTM weights
+        for (int l = 0; l < 4; l++) {
+            char key[128];
+            snprintf(key, sizeof(key), "enc_mi_layer.1.lstm.weight_ih_l%d", l);
+            info = sf2.find(key); if (info) { w.mi_lstm_w_ih[l] = new float[2048*512]; sf2.load_raw(*info, w.mi_lstm_w_ih[l], 2048*512); }
+            snprintf(key, sizeof(key), "enc_mi_layer.1.lstm.weight_hh_l%d", l);
+            info = sf2.find(key); if (info) { w.mi_lstm_w_hh[l] = new float[2048*512]; sf2.load_raw(*info, w.mi_lstm_w_hh[l], 2048*512); }
+            snprintf(key, sizeof(key), "enc_mi_layer.1.lstm.bias_ih_l%d", l);
+            info = sf2.find(key); if (info) { w.mi_lstm_b_ih[l] = new float[2048]; sf2.load_raw(*info, w.mi_lstm_b_ih[l], 2048); }
+            snprintf(key, sizeof(key), "enc_mi_layer.1.lstm.bias_hh_l%d", l);
+            info = sf2.find(key); if (info) { w.mi_lstm_b_hh[l] = new float[2048]; sf2.load_raw(*info, w.mi_lstm_b_hh[l], 2048); }
+        }
+        // enc_mi_layer.2: Linear(512→128)
+        info = sf2.find("enc_mi_layer.2.weight");
+        if (info) { w.mi_w2 = new float[128*512]; sf2.load_raw(*info, w.mi_w2, 128*512); }
+        info = sf2.find("enc_mi_layer.2.bias");
+        if (info) { w.mi_b2 = new float[128]; sf2.load_raw(*info, w.mi_b2, 128); }
+        // pre_proj: Conv1d(128→256, K=1)
+        info = sf2.find("pre_proj.weight");
+        if (info) { w.pre_proj_w = new float[256*128]; sf2.load_raw(*info, w.pre_proj_w, 256*128); }
+        info = sf2.find("pre_proj.bias");
+        if (info) { w.pre_proj_b = new float[256]; sf2.load_raw(*info, w.pre_proj_b, 256); }
+        sf2.close();
+        printf("  enc_mi_layer + pre_proj: loaded\n");
+    }
+    
     w.loaded = true;
     printf("  AudioVAE encoder: loaded\n");
     return true;
@@ -312,6 +359,60 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
     
     delete[] cur;
     
+    // === enc_mi_layer: Linear(128→512) → LSTM(4×512,skip) → Linear(512→128) ===
+    float * mi_latents = final_out; // reuse buffer: 128 * final_T
+    if (w.mi_w1) {
+        int T = final_T;
+        // Linear 128→512
+        float * mi_buf = new float[T * 512];
+        for (int t = 0; t < T; t++)
+            for (int o = 0; o < 512; o++) {
+                float s = w.mi_b1[o];
+                for (int i = 0; i < 128; i++)
+                    s += final_out[t * 128 + i] * w.mi_w1[o * 128 + i];
+                mi_buf[t * 512 + o] = s;
+            }
+        // LSTM
+        const float *w_ih[4]={w.mi_lstm_w_ih[0],w.mi_lstm_w_ih[1],w.mi_lstm_w_ih[2],w.mi_lstm_w_ih[3]};
+        const float *w_hh[4]={w.mi_lstm_w_hh[0],w.mi_lstm_w_hh[1],w.mi_lstm_w_hh[2],w.mi_lstm_w_hh[3]};
+        const float *b_ih[4]={w.mi_lstm_b_ih[0],w.mi_lstm_b_ih[1],w.mi_lstm_b_ih[2],w.mi_lstm_b_ih[3]};
+        const float *b_hh[4]={w.mi_lstm_b_hh[0],w.mi_lstm_b_hh[1],w.mi_lstm_b_hh[2],w.mi_lstm_b_hh[3]};
+        float * lstm_out = new float[T * 512];
+        lstm_forward(mi_buf, T, 512, 4, w_ih, w_hh, b_ih, b_hh, lstm_out, true);
+        delete[] mi_buf;
+        // Linear 512→128
+        for (int t = 0; t < T; t++)
+            for (int o = 0; o < 128; o++) {
+                float s = w.mi_b2[o];
+                for (int i = 0; i < 512; i++)
+                    s += lstm_out[t * 512 + i] * w.mi_w2[o * 512 + i];
+                mi_latents[t * 128 + o] = s;
+            }
+        delete[] lstm_out;
+        printf("  enc_mi_layer: done\\n");
+    }
+    
+    // === pre_proj: Conv1d(128→256, K=1) ===
+    if (w.pre_proj_w) {
+        float * proj_out = new float[256 * final_T];
+        for (int t = 0; t < final_T; t++)
+            for (int o = 0; o < 256; o++) {
+                float s = w.pre_proj_b ? w.pre_proj_b[o] : 0;
+                for (int i = 0; i < 128; i++)
+                    s += mi_latents[t * 128 + i] * w.pre_proj_w[o * 128 + i];
+                proj_out[o * final_T + t] = s;  // channel-major for Conv1d output
+            }
+        // Extract mean (first 128 of 256 channels)
+        for (int t = 0; t < final_T; t++)
+            memcpy(mi_latents + t * 128, proj_out + t, 128 * sizeof(float)); // wait, need proper transposition
+        // Actually proj_out is [C,T] channel-major, output is [T,C] time-major
+        for (int t = 0; t < final_T; t++)
+            for (int c = 0; c < 128; c++)
+                mi_latents[t * 128 + c] = proj_out[c * final_T + t];
+        delete[] proj_out;
+        printf("  pre_proj: done\\n");
+    }
+
     // Copy to output
     *n_frames_out = final_T;
     memcpy(latents_out, final_out, 128 * final_T * sizeof(float));
