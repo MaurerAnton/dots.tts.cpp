@@ -346,6 +346,8 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     // === Bottleneck: post_proj (1x1 conv) → permute → dec_mi_layer → permute ===
     // post_proj: Conv1d(128, 128, 1), causal irrelevant (K=1)
     conv1d_causal(tmp, latent, 128, n_frames, dec.post_proj_w.ptr(), dec.post_proj_b.ptr(), 128, 1);
+    { float rms=0; for(int i=0;i<n_frames*128;i++) rms+=tmp[i]*tmp[i];
+      printf("  post_proj only: rms=%.4f\\n", sqrtf(rms/(n_frames*128))); }
 
     // dec_mi_layer: Linear(128→512) → LSTM(4×512, skip) → Linear(512→128)
     float * mi_buf = (float*)malloc(n_frames * 512 * sizeof(float));
@@ -356,6 +358,8 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
                 s += tmp[t * 128 + i] * dec.mi_w1.ptr()[o * 128 + i];
             mi_buf[t * 512 + o] = s;
         }
+    { float rms=0; for(int i=0;i<n_frames*512;i++) rms+=mi_buf[i]*mi_buf[i];
+      printf("  mi_linear1: rms=%.4f\\n", sqrtf(rms/(n_frames*512))); }
     const float * w_ih[4] = {dec.mi_lstm_w_ih[0].ptr(), dec.mi_lstm_w_ih[1].ptr(),
                               dec.mi_lstm_w_ih[2].ptr(), dec.mi_lstm_w_ih[3].ptr()};
     const float * w_hh[4] = {dec.mi_lstm_w_hh[0].ptr(), dec.mi_lstm_w_hh[1].ptr(),
@@ -405,7 +409,9 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
         free(padded);
     }
     { float rms=0; for(int i=0;i<n_frames*conv_pre_ch;i++) rms+=x[i]*x[i];
-      printf("  conv_pre: rms=%.4f\n", sqrtf(rms/(n_frames*conv_pre_ch))); }
+      printf("  conv_pre: rms=%.4f\\n", sqrtf(rms/(n_frames*conv_pre_ch)));
+      // DUMP for Python comparison
+      { FILE * df = fopen("debug/cpp_convpre.bin", "wb"); if(df){fwrite(x,sizeof(float),n_frames*conv_pre_ch,df);fclose(df);} } }
     int cur_ch = conv_pre_ch, cur_len = n_frames;
 
     // === 6 decoder stages ===
