@@ -106,3 +106,12 @@ target_include_directories(test_encoder PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
 )
 target_link_libraries(test_encoder PRIVATE ggml pthread m)
+
+# ---- Test BigVGAN vs Python reference ----
+add_executable(test_bigvgan_cmp test/test_bigvgan_cmp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_bigvgan_cmp PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_bigvgan_cmp PRIVATE ggml pthread m)

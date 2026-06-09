@@ -5,7 +5,7 @@
 #include <cmath>
 
 int main() {
-    const char * sf_path = "/home/bym/dots.tts.cpp/models/vocoder_eff.safetensors";
+    const char * sf_path = "/home/bym/dots.tts.cpp/models/vocoder_no_wn.safetensors";
     
     // Load reference latents
     float * latents = new float[16 * 128];
@@ -17,7 +17,7 @@ int main() {
     
     // Load Python reference audio
     float * ref_audio = new float[30720];
-    f = fopen("/tmp/ref_audio_py.bin", "rb");
+    f = fopen("/tmp/ref_audio_no_wn.bin", "rb");
     if (!f) { printf("No ref audio\n"); return 1; }
     int ref_n = fread(ref_audio, sizeof(float), 30720, f);
     fclose(f);

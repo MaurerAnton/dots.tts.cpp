@@ -511,7 +511,7 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     // Clamp to [-1, 1] (no tanh), then apply output gain
     float * fb = tmp;
     // Calibrated gain: sign flip + RMS ratio (verified vs Python on real latents, corr 0.993)
-    const float output_gain = -2.66f;
+    const float output_gain = 1.0f;
     for (int i = 0; i < final_len; i++) {
         tmp[i] *= output_gain;
         if (tmp[i] > 1.0f) tmp[i] = 1.0f;
