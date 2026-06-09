@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Anton Maurer
 // dots.tts.cpp - DiT forward pass for ggml
-// All biases applied. Time embedder computed manually.
+// All biases applied. Time embedder + speaker computed manually.
 
 #include "dots_tts.h"
 #include "dots_tts_util.h"
@@ -23,6 +23,7 @@ ggml_tensor * dit_attention_multihead(
 // ===========================================================================
 // Manual time_embedder: sinusoidal(t,256) -> Linear(256->1024)+bias -> SiLU -> Linear(1024->1024)+bias
 // Computed in pure C++ because ggml graph was not computing the time_embedder branch.
+// Weight access: PyTorch W[o,i] = ggml_W at offset i + o * ne[0] (row-major, ne[0]=stride)
 // ===========================================================================
 
 static ggml_tensor * compute_time_embedding_manual(
@@ -32,7 +33,6 @@ static ggml_tensor * compute_time_embedding_manual(
     float t_val = ((float*)t_tensor->data)[0];
     int emb_dim = 256, half = emb_dim / 2;
 
-    // Sinusoidal embedding
     float sin_emb[256];
     for (int i = 0; i < half; i++) {
         float freq = expf(-logf(10000.0f) * (float)i / (float)(half - 1));
@@ -41,28 +41,23 @@ static ggml_tensor * compute_time_embedding_manual(
         sin_emb[half + i] = cosf(arg);
     }
 
-    // MLP layer 1: Linear(256 -> 1024) + bias
+    // MLP layer 1: Linear(256 -> 1024) + bias + SiLU
     float h1[1024];
     {
         float * w1 = tensor_data(model.t_embed_w1);
         float * b1 = model.t_embed_b1 ? tensor_data(model.t_embed_b1) : nullptr;
-        // w1: ggml ne=[256,1024]; PyTorch W[o,i] = ggml_W[i + o*256]
         for (int o = 0; o < 1024; o++) {
             float s = b1 ? b1[o] : 0.0f;
             for (int i = 0; i < emb_dim; i++) s += w1[i + o * 256] * sin_emb[i];
-            h1[o] = s;
+            h1[o] = s / (1.0f + expf(-s));  // SiLU
         }
     }
-
-    // SiLU
-    for (int i = 0; i < 1024; i++) { float x = h1[i]; h1[i] = x / (1.0f + expf(-x)); }
 
     // MLP layer 2: Linear(1024 -> 1024) + bias
     float h2[1024];
     {
         float * w2 = tensor_data(model.t_embed_w2);
         float * b2 = model.t_embed_b2 ? tensor_data(model.t_embed_b2) : nullptr;
-        // w2: ggml ne=[1024,1024]; PyTorch W[o,i] = ggml_W[o*1024+i]
         for (int o = 0; o < 1024; o++) {
             float s = b2 ? b2[o] : 0.0f;
             for (int i = 0; i < 1024; i++) s += w2[o * 1024 + i] * h1[i];
@@ -76,7 +71,22 @@ static ggml_tensor * compute_time_embedding_manual(
 }
 
 // ===========================================================================
-// Timestep embedding (kept for reference)
+// Manual speaker projection: Linear(512->1024)+bias+SiLU (first layer of xvec_proj)
+// ===========================================================================
+
+static void compute_speaker_manual(dit_model & model, ggml_tensor * speaker_emb, float * out) {
+    float * sw1 = tensor_data(model.spk_proj_w1);
+    float * sb1 = model.spk_proj_b1 ? tensor_data(model.spk_proj_b1) : nullptr;
+    float * se = tensor_data(speaker_emb);
+    for (int o = 0; o < 1024; o++) {
+        float s = sb1 ? sb1[o] : 0.0f;
+        for (int i = 0; i < 512; i++) s += sw1[i + o * 512] * se[i];
+        out[o] = s / (1.0f + expf(-s));  // SiLU
+    }
+}
+
+// ===========================================================================
+// Timestep embedding (kept for reference/testing)
 // ===========================================================================
 
 ggml_tensor * dit_timestep_embedding(ggml_context * ctx, ggml_tensor * t, int dim) {
@@ -180,16 +190,22 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
     x = ggml_cont(ctx, ggml_permute(ctx, x, 2, 0, 1, 3));
     x = ggml_reshape_2d(ctx, x, hidden, n_tokens);
 
-    // Time embedding (manual) + speaker
+    // Time embedding (manual, leaf tensor)
     ggml_tensor * t_emb = compute_time_embedding_manual(ctx, t, model);
-    ggml_tensor * cond = t_emb;
+
+    // Speaker conditioning (manual, merged into new leaf tensor)
+    ggml_tensor * cond;
     if (speaker_emb && model.spk_proj_w1) {
-        ggml_tensor * spk = ggml_mul_mat(ctx, model.spk_proj_w1, speaker_emb);
-        if (model.spk_proj_b1) spk = ggml_add(ctx, spk, model.spk_proj_b1);
-        spk = ggml_silu(ctx, spk);
-        cond = ggml_add(ctx, cond, spk);
+        float spk_vals[1024];
+        compute_speaker_manual(model, speaker_emb, spk_vals);
+        float * te = tensor_data(t_emb);
+        cond = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, n_batch);
+        float * cd = tensor_data(cond);
+        for (int i = 0; i < 1024; i++) cd[i] = te[i] + spk_vals[i];
+    } else {
+        cond = t_emb;
     }
-    cond = ggml_silu(ctx, cond);
+    // NOTE: no SiLU on cond — Python vfp.forward does NOT apply SiLU to c.
 
     // Input layer
     if (model.input_layer_w) {
