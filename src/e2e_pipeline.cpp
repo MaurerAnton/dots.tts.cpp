@@ -219,7 +219,13 @@ int main(int argc, char ** argv) {
             if (dump_debug) dit_dump.capture();
             if (dump_debug) dit_dump.write_all("debug");
                 float * vnull = tensor_data(dout_null);
-                for (int i = 0; i < patch_flat; i++) v_t[i] = vnull[i] + cfg_scale * (v_t[i] - vnull[i]);
+                for (int p = 0; p < patch_size; p++) {
+                    int t_idx = noise_pos + p;
+                    for (int c = 0; c < VAE_LATENT_DIM; c++) {
+                        float vn = vnull[c * cond_seq + t_idx];
+                        v_t[p * VAE_LATENT_DIM + c] = vn + cfg_scale * (v_t[p * VAE_LATENT_DIM + c] - vn);
+                    }
+                }
             }
             { float vr=0; for(int i=0;i<patch_flat;i++) vr+=v_t[i]*v_t[i]; vr=sqrtf(vr/patch_flat); float mv=15.0f, vs=(vr>mv)?(mv/vr):1.0f;
               for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*vs*dt;if(z_t[i]>50)z_t[i]=50;if(z_t[i]<-50)z_t[i]=-50;} }
