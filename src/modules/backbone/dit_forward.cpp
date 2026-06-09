@@ -11,6 +11,8 @@
 #include "dots_tts_util.h"
 #include "dit.h"
 #include "ggml.h"
+#include "ggml-cpu.h"
+#include "ggml.h"
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -469,8 +471,21 @@ ggml_tensor * dit_forward(
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
     }
 
+    static int dump_count = 0;
     for (int i = 0; i < model.n_layers; i++) {
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
+        if (i == 0 && dump_count == 0) {
+            dump_count++;
+            ggml_cgraph * dgf = ggml_new_graph(ctx);
+            ggml_build_forward_expand(dgf, x);
+            ggml_graph_compute_with_ctx(ctx, dgf, 1);
+            float * xd = (float*)x->data;
+            int n = seq_len * n_batch * DIT_HIDDEN_SIZE;
+            float r=0; for(int j=0;j<n;j++) r+=xd[j]*xd[j];
+            FILE * df = fopen("debug/dit_block0.bin", "wb");
+            if(df){fwrite(xd,sizeof(float),n,df);fclose(df);}
+            printf("  DiT block0 out: rms=%.4f\\n", sqrtf(r/n));
+        }
     }
 
     // Output: adaLN modulation + linear projection
