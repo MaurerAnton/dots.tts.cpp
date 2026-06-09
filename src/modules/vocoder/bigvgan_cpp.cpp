@@ -510,12 +510,12 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
     // Clamp to [-1, 1] (no tanh), then apply output gain
     float * fb = tmp;
-    // Match Python BigVGAN output level (C++ conv/AMP has ~3.4x lower gain)
-    const float output_gain = 2.8f;
+    // Sign flip + gain calibration for effective weights
+    const float output_gain = -2.432f; // sign flip * RMS ratio (0.0157/0.00646)
     for (int i = 0; i < final_len; i++) {
-        fb[i] *= output_gain;
-        if (fb[i] > 1.0f) fb[i] = 1.0f;
-        if (fb[i] < -1.0f) fb[i] = -1.0f;
+        tmp[i] *= output_gain;
+        if (tmp[i] > 1.0f) tmp[i] = 1.0f;
+        if (tmp[i] < -1.0f) tmp[i] = -1.0f;
     }
     { float rms=0, mn=fb[0], mx=fb[0];
       for(int i=0;i<final_len;i++){rms+=fb[i]*fb[i];if(fb[i]<mn)mn=fb[i];if(fb[i]>mx)mx=fb[i];}
