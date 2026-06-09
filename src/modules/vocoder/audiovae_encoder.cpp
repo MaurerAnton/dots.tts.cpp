@@ -35,12 +35,16 @@ static void causal_conv1d_wn(float * out, const float * in, int C_in, int T,
     
     int T_out = (padded_T - dilation * (K - 1) - 1) / stride + 1;
     
-    // Compute actual weights from weight norm
+    // Compute actual weights from weight norm (or use directly if no wg)
     float * actual_w = new float[C_out * C_in * K];
-    for (int o = 0; o < C_out; o++) {
-        float s = wn_scale(wg[o], wv + o * C_in * K, C_in * K);
-        for (int i = 0; i < C_in * K; i++)
-            actual_w[o * C_in * K + i] = wv[o * C_in * K + i] * s;
+    if (wg) {
+        for (int o = 0; o < C_out; o++) {
+            float s = wn_scale(wg[o], wv + o * C_in * K, C_in * K);
+            for (int i = 0; i < C_in * K; i++)
+                actual_w[o * C_in * K + i] = wv[o * C_in * K + i] * s;
+        }
+    } else {
+        memcpy(actual_w, wv, C_out * C_in * K * sizeof(float));
     }
     
     // Conv1d
@@ -71,30 +75,31 @@ static void leaky_relu(float * x, int n, float slope = 0.2f) {
 
 static void load_wn_conv(SafeTensorsFile & sf, const char * prefix,
                           float * & wg, float * & wv, float * & bias, int & C_out, int & C_in, int & K) {
-    // weight_v
+    // Try weight_v (original safetensors with weight_norm)
     std::string wv_name = std::string(prefix) + ".weight_v";
     auto info = sf.find(wv_name.c_str());
+    if (info) {
+        C_out = info->shape[0]; C_in = info->shape[1]; K = info->shape[2];
+        int n = C_out * C_in * K;
+        wv = new float[n]; sf.load_raw(*info, wv, n);
+        std::string wg_name = std::string(prefix) + ".weight_g";
+        wg = new float[C_out]; sf.load_raw(*sf.find(wg_name.c_str()), wg, C_out);
+        std::string b_name = std::string(prefix) + ".bias";
+        auto binfo = sf.find(b_name.c_str());
+        if (binfo) { bias = new float[C_out]; sf.load_raw(*binfo, bias, C_out); }
+        return;
+    }
+    // Fallback: try .weight directly (effective weights, no weight_norm needed)
+    std::string w_name = std::string(prefix) + ".weight";
+    info = sf.find(w_name.c_str());
     if (!info) return;
-    C_out = info->shape[0];
-    C_in = info->shape[1];
-    K = info->shape[2];
-    
+    C_out = info->shape[0]; C_in = info->shape[1]; K = info->shape[2];
     int n = C_out * C_in * K;
-    wv = new float[n];
-    sf.load_raw(*info, wv, n);
-    
-    // weight_g
-    std::string wg_name = std::string(prefix) + ".weight_g";
-    wg = new float[C_out];
-    sf.load_raw(*sf.find(wg_name.c_str()), wg, C_out);
-    
-    // bias
+    wg = nullptr;  // signal: no weight_norm
+    wv = new float[n]; sf.load_raw(*info, wv, n);
     std::string b_name = std::string(prefix) + ".bias";
     auto binfo = sf.find(b_name.c_str());
-    if (binfo) {
-        bias = new float[C_out];
-        sf.load_raw(*binfo, bias, C_out);
-    }
+    if (binfo) { bias = new float[C_out]; sf.load_raw(*binfo, bias, C_out); }
 }
 
 bool audiovae_encoder_load(const char * safetensors_path, AudioVAEEncoderWeights & w) {
@@ -182,6 +187,8 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
     int T_pre = T; // stride=1
     float * pre_out = new float[C_pre * T_pre];
     causal_conv1d_wn(pre_out, audio, 1, T, w.pre_conv_wg, w.pre_conv_wv, w.pre_conv_bias, 12, 3, 1, 1);
+    { float rms=0; for(int i=0;i<12*T;i++) rms+=pre_out[i]*pre_out[i];
+      printf("  enc pre-conv: rms=%.4f\n", sqrtf(rms/(12*T))); }
     leaky_relu(pre_out, C_pre * T_pre);
     
     float * cur = pre_out;
