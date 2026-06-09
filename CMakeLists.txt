@@ -37,6 +37,7 @@ add_executable(e2e_pipeline
     src/utils/dit_loader.cpp
     src/utils/patchenc_loader.cpp
     src/modules/speaker/campp.cpp
+    src/modules/vocoder/audiovae_encoder.cpp
 )
 target_include_directories(e2e_pipeline PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -96,3 +97,12 @@ target_include_directories(test_campp PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
 )
 target_link_libraries(test_campp PRIVATE ggml pthread m)
+
+# ---- Test AudioVAE encoder ----
+add_executable(test_encoder test/test_encoder.cpp src/modules/vocoder/audiovae_encoder.cpp src/utils/safetensors.cpp)
+target_include_directories(test_encoder PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_encoder PRIVATE ggml pthread m)

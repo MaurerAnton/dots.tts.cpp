@@ -31,7 +31,7 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 | **DiT** (AR flow-matching head) | 18 | 1024 | 346,920,320 | Done |
 | **PatchEncoder** (semantic encoder) | 24 | 1024 | 305,498,752 | Done |
 | **BigVGAN decoder** | 6 stages, 18 AMP blocks | — | 136,509,072 | Done |
-| **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | TODO |
+| **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | Done |
 | **CAM++** (speaker encoder) | — | 512 | 7,259,203 | Done |
 | **BPE Tokenizer** | — | [vocab=151,672](models/token_vocab.txt#L151672) | — | Via llama.cpp |
 | **Total** | | | **2,386,220,193** | |
@@ -53,6 +53,15 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 
 - 6 upsampling stages, 3 SnakeBeta AMP blocks per stage
 - 1920-sample hop, 48 kHz output, SLSTM bottleneck (4 layers, hidden=512)
+
+### AudioVAE encoder (causal conv stack)
+
+- 7 strided Conv1d stages: channels 12→24→48→96→192→384→768→128
+- Strides: [2, 2, 2, 4, 6, 10], total 1920× downsampling (48kHz → 25Hz)
+- Each stage: transition conv + ResStack (6 dilated conv pairs, dil=1,2,4,8,16,32)
+- Weight normalization (weight_g + weight_v) + LeakyReLU(0.2)
+- Fully causal: left-padding only, zero lookahead
+- Output: 128-dim VAE latents at 25 Hz
 
 ### CAM++ (speaker encoder)
 
@@ -79,6 +88,7 @@ dots.tts.cpp/
 │   │   └── vocoder/
 │   │       ├── bigvgan_cpp.cpp  # BigVGAN decoder
 │   │       ├── audiovae.cpp     # AudioVAE wrapper
+│   │       ├── audiovae_encoder.cpp # AudioVAE encoder
 │   │       └── lstm.cpp         # SLSTM bottleneck
 │   │   └── speaker/
 │   │       └── campp.cpp        # CAM++ speaker encoder
