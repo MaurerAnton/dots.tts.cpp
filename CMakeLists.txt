@@ -107,6 +107,32 @@ target_include_directories(test_encoder PRIVATE
 )
 target_link_libraries(test_encoder PRIVATE ggml pthread m)
 
+# ---- Test time_embedder isolated ----
+add_executable(test_time_embed test/test_time_embed.cpp
+    src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/dit_attention.cpp
+    src/utils/safetensors.cpp
+    src/utils/dit_loader.cpp)
+target_include_directories(test_time_embed PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_time_embed PRIVATE ggml pthread m)
+
+# ---- DiT calibration test ----
+add_executable(test_dit_calib test/test_dit_calibrate.cpp
+    src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/dit_attention.cpp
+    src/utils/safetensors.cpp
+    src/utils/dit_loader.cpp)
+target_include_directories(test_dit_calib PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_dit_calib PRIVATE ggml pthread m)
+
 # ---- Test BigVGAN vs Python reference ----
 add_executable(test_bigvgan_cmp test/test_bigvgan_cmp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
 target_include_directories(test_bigvgan_cmp PRIVATE

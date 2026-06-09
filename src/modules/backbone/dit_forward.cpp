@@ -129,8 +129,36 @@ static ggml_tensor * dit_block_forward_simple(ggml_context * ctx,
 {
     int hidden = DIT_HIDDEN_SIZE, n_tokens = seq_len * n_batch;
 
-    ggml_tensor * adaln = ggml_mul_mat(ctx, block.adaln_linear_w, cond);
-    if (block.adaln_linear_b) adaln = ggml_add(ctx, adaln, block.adaln_linear_b);
+    // adaLN: compute MANUALLY (ggml graph fails with leaf cond)
+    // Python: adaLN_modulation = Sequential(SiLU(), Linear(1024, 6144))
+    // So: apply SiLU to cond first, then matmul
+    float cond_silu[1024];
+    {
+        float * cd = tensor_data(cond);
+        for (int i = 0; i < 1024; i++) cond_silu[i] = cd[i] / (1.0f + expf(-cd[i]));
+        float r = 0; for (int i = 0; i < 1024; i++) r += cond_silu[i]*cond_silu[i];
+        static int cnt = 0;
+        if (cnt == 0) fprintf(stderr, "  block0 cond rms=%.4f silu_rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/1024), cnt, cond_silu[0], cond_silu[1], cond_silu[2]);
+        cnt++;
+    }
+    float adaln_raw[6 * DIT_HIDDEN_SIZE];
+    {
+        float * aw = tensor_data(block.adaln_linear_w);  // ne=[1024, 6144]
+        float * ab = block.adaln_linear_b ? tensor_data(block.adaln_linear_b) : nullptr;
+        for (int o = 0; o < 6 * hidden; o++) {
+            float s = ab ? ab[o] : 0.0f;
+            for (int i = 0; i < DIT_HIDDEN_SIZE; i++) s += aw[i + o * DIT_HIDDEN_SIZE] * cond_silu[i];
+            adaln_raw[o] = s;
+        }
+    }
+    ggml_tensor * adaln = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 6 * hidden, 1);
+    memcpy(tensor_data(adaln), adaln_raw, 6 * hidden * sizeof(float));
+    // DEBUG
+    { float r = 0; for (int i = 0; i < 6*hidden; i++) r += adaln_raw[i]*adaln_raw[i];
+      fprintf(stderr, "  adaLN manual: rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f] has_nan=%d\n",
+          sqrtf(r/(6*hidden)), adaln_raw[0], adaln_raw[1], adaln_raw[2], adaln_raw[3], adaln_raw[4],
+          (int)std::isnan(adaln_raw[0])); }
 
     int stride = hidden;
     ggml_tensor * sm = ggml_view_2d(ctx, adaln, hidden, n_batch, adaln->nb[1], 0);
@@ -194,6 +222,8 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
     ggml_tensor * t_emb = compute_time_embedding_manual(ctx, t, model);
 
     // Speaker conditioning (manual, merged into new leaf tensor)
+    // NOTE: xvec_proj = Sequential(Linear(512,1024), LayerNorm(1024))
+    // Currently loading only first layer; TODO: add LayerNorm
     ggml_tensor * cond;
     if (speaker_emb && model.spk_proj_w1) {
         float spk_vals[1024];
@@ -219,8 +249,21 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
     // Output
     ggml_tensor * out = x;
     if (model.out_adaln_w) {
-        ggml_tensor * mod = ggml_mul_mat(ctx, model.out_adaln_w, cond);
-        if (model.out_adaln_b) mod = ggml_add(ctx, mod, model.out_adaln_b);
+        // Compute output adaLN manually (same pattern as block adaLN)
+        float cond_silu[1024];
+        { float * cd = tensor_data(cond); for (int i = 0; i < 1024; i++) cond_silu[i] = cd[i] / (1.0f + expf(-cd[i])); }
+        float mod_raw[2 * DIT_HIDDEN_SIZE];
+        {
+            float * aw = tensor_data(model.out_adaln_w);  // ne=[1024, 2048]
+            float * ab = model.out_adaln_b ? tensor_data(model.out_adaln_b) : nullptr;
+            for (int o = 0; o < 2 * hidden; o++) {
+                float s = ab ? ab[o] : 0.0f;
+                for (int i = 0; i < DIT_HIDDEN_SIZE; i++) s += aw[i + o * DIT_HIDDEN_SIZE] * cond_silu[i];
+                mod_raw[o] = s;
+            }
+        }
+        ggml_tensor * mod = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2 * DIT_HIDDEN_SIZE, 1);
+        memcpy(tensor_data(mod), mod_raw, 2 * DIT_HIDDEN_SIZE * sizeof(float));
         int stride = DIT_HIDDEN_SIZE;
         ggml_tensor * shift = ggml_view_2d(ctx, mod, DIT_HIDDEN_SIZE, n_batch, mod->nb[1], 0);
         ggml_tensor * scale = ggml_view_2d(ctx, mod, DIT_HIDDEN_SIZE, n_batch, mod->nb[1], stride * sizeof(float));
