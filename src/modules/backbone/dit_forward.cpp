@@ -462,6 +462,9 @@ ggml_tensor * dit_forward(
     ggml_tensor * t,           // [n_batch] timestep
     ggml_tensor * speaker_emb, dit_dump_ctx * dump) // [speaker_dim, n_batch] or nullptr
 {
+    static int call_count = 0;
+    if (dump && call_count > 0) dump->enabled = false;
+    call_count++;
     int seq_len = x->ne[0];
     int n_batch = x->ne[1];
     int hidden  = DIT_HIDDEN_SIZE;
