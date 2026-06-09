@@ -35,10 +35,10 @@ static ggml_tensor * compute_time_embedding_manual(
 
     float sin_emb[256];
     for (int i = 0; i < half; i++) {
-        float freq = expf(-logf(10000.0f) * (float)i / (float)(half - 1));
+        float freq = expf(-logf(10000.0f) * (float)i / (float)half);  // Python: / half, not / (half-1)
         float arg = t_val * freq;
-        sin_emb[i] = sinf(arg);
-        sin_emb[half + i] = cosf(arg);
+        sin_emb[i] = cosf(arg);           // Python: [cos, sin] order
+        sin_emb[half + i] = sinf(arg);
     }
 
     // MLP layer 1: Linear(256 -> 1024) + bias + SiLU
@@ -71,17 +71,37 @@ static ggml_tensor * compute_time_embedding_manual(
 }
 
 // ===========================================================================
-// Manual speaker projection: Linear(512->1024)+bias+SiLU (first layer of xvec_proj)
+// Manual speaker projection: Linear(512->1024) + LayerNorm(1024)
+// Python: xvec_proj = Sequential(Linear(512,1024), LayerNorm(1024))
 // ===========================================================================
 
 static void compute_speaker_manual(dit_model & model, ggml_tensor * speaker_emb, float * out) {
     float * sw1 = tensor_data(model.spk_proj_w1);
     float * sb1 = model.spk_proj_b1 ? tensor_data(model.spk_proj_b1) : nullptr;
     float * se = tensor_data(speaker_emb);
+    float temp[1024];
+
+    // Step 1: Linear(512 -> 1024)
     for (int o = 0; o < 1024; o++) {
         float s = sb1 ? sb1[o] : 0.0f;
         for (int i = 0; i < 512; i++) s += sw1[i + o * 512] * se[i];
-        out[o] = s / (1.0f + expf(-s));  // SiLU
+        temp[o] = s;
+    }
+
+    // Step 2: LayerNorm
+    float mean = 0, var = 0;
+    for (int i = 0; i < 1024; i++) mean += temp[i];
+    mean /= 1024;
+    for (int i = 0; i < 1024; i++) { float d = temp[i] - mean; var += d * d; }
+    var = var / 1024 + 1e-5f;
+    float inv_std = 1.0f / sqrtf(var);
+    float * ln_w = model.spk_ln_w ? tensor_data(model.spk_ln_w) : nullptr;
+    float * ln_b = model.spk_ln_b ? tensor_data(model.spk_ln_b) : nullptr;
+    for (int i = 0; i < 1024; i++) {
+        float x = (temp[i] - mean) * inv_std;
+        if (ln_w) x *= ln_w[i];
+        if (ln_b) x += ln_b[i];
+        out[i] = x;
     }
 }
 
@@ -228,10 +248,15 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
     if (speaker_emb && model.spk_proj_w1) {
         float spk_vals[1024];
         compute_speaker_manual(model, speaker_emb, spk_vals);
+        // Manual add: t_emb + spk
         float * te = tensor_data(t_emb);
         cond = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, n_batch);
         float * cd = tensor_data(cond);
         for (int i = 0; i < 1024; i++) cd[i] = te[i] + spk_vals[i];
+        { float r = 0; for (int i = 0; i < 1024; i++) r += spk_vals[i]*spk_vals[i];
+          fprintf(stderr, "  speaker g_cond rms=%.4f first3=[%.4f,%.4f,%.4f] ln_w=%s ln_b=%s\n",
+              sqrtf(r/1024), spk_vals[0], spk_vals[1], spk_vals[2],
+              model.spk_ln_w ? "LOADED" : "NULL", model.spk_ln_b ? "LOADED" : "NULL"); }
     } else {
         cond = t_emb;
     }
