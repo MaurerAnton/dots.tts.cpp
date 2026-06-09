@@ -176,6 +176,7 @@ int main(int argc, char ** argv) {
             dit_dump_ctx dit_dump; dit_dump.enabled = dump_debug;
             ggml_tensor * dout = dit_forward(dit, gctx, dx, ti, spk, &dit_dump);
             { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
+            if (dump_debug) dit_dump.capture();
             if (dump_debug) dit_dump.write_all("debug");
             float * vdata = tensor_data(dout);
             // DUMP DiT input/output for first call, first step
@@ -215,6 +216,7 @@ int main(int argc, char ** argv) {
                 dx_null = ggml_cont(gctx, ggml_permute(gctx, dx_null, 2, 1, 0, 3));
                 ggml_tensor * dout_null = dit_forward(dit, gctx, dx_null, ti, spk);
                 { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout_null); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
+            if (dump_debug) dit_dump.capture();
             if (dump_debug) dit_dump.write_all("debug");
                 float * vnull = tensor_data(dout_null);
                 for (int i = 0; i < patch_flat; i++) v_t[i] = vnull[i] + cfg_scale * (v_t[i] - vnull[i]);

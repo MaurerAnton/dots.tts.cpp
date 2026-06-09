@@ -6,13 +6,16 @@
 #include "ggml.h"
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 
 #define DIT_DUMP_MAX 64
 
 struct dit_dump_slot {
     const char * name;
     ggml_tensor * tensor;
-    int n_elements;  // 0 = auto-detect from tensor shape
+    int n_elements;
+    float * copy;  // captured copy of tensor data
+    ~dit_dump_slot() { delete[] copy; }
 };
 
 struct dit_dump_ctx {
@@ -30,6 +33,19 @@ struct dit_dump_ctx {
         count++;
     }
     
+    void capture() {
+        // Call AFTER ggml_graph_compute, copies tensor data before it gets overwritten
+        if (!enabled || count == 0) return;
+        for (int i = 0; i < count; i++) {
+            if (!slots[i].tensor || !slots[i].tensor->data) continue;
+            if (slots[i].copy) continue; // already captured
+            int n = slots[i].n_elements;
+            if (n == 0) { n = 1; for (int d = 0; d < 4; d++) if (slots[i].tensor->ne[d] > 0) n *= slots[i].tensor->ne[d]; }
+            slots[i].copy = new float[n];
+            memcpy(slots[i].copy, slots[i].tensor->data, n * sizeof(float));
+        }
+    }
+    
     void write_all(const char * dir = "debug") {
         if (!enabled || count == 0) return;
         for (int i = 0; i < count; i++) {
@@ -44,11 +60,11 @@ struct dit_dump_ctx {
                 for (int d = 0; d < 4; d++)
                     if (slots[i].tensor->ne[d] > 0) n *= slots[i].tensor->ne[d];
             }
-            fwrite(slots[i].tensor->data, sizeof(float), n, f);
+            float * data = slots[i].copy ? slots[i].copy : (float*)slots[i].tensor->data;
+            fwrite(data, sizeof(float), n, f);
             fclose(f);
             float rms = 0;
-            float * d = (float*)slots[i].tensor->data;
-            for (int j = 0; j < n; j++) rms += d[j] * d[j];
+            for (int j = 0; j < n; j++) rms += data[j] * data[j];
             printf("  DiT dump %s: %d elems, rms=%.4f\n", slots[i].name, n, sqrtf(rms/n));
         }
         count = 0; // reset after write
