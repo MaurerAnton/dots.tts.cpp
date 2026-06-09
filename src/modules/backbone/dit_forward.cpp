@@ -293,35 +293,55 @@ static ggml_tensor * dit_attention(
     // Q: [n_heads, head_dim, n_tokens] -> [head_dim, n_heads, n_tokens] via permute
     // But mul_mat operates on last two dims...
     
-    // For MVP: single-head attention (all heads merged)
-    // mul_mat(A, B) = A^T @ B. A^T = Q^T = [n_tokens, hidden]. A^T @ K = [n_tokens, hidden] @ [hidden, n_tokens] = [n_tokens, n_tokens]
-    // So: scores = mul_mat(Q, K) where both are [hidden, n_tokens]
-    ggml_tensor * Qf = ggml_reshape_2d(ctx, q, hidden, n_tokens); // [hidden, n_tokens]
-    ggml_tensor * Kf = ggml_reshape_2d(ctx, k, hidden, n_tokens); // [hidden, n_tokens]
-    ggml_tensor * Vf = ggml_reshape_2d(ctx, v, hidden, n_tokens); // [hidden, n_tokens]
-
-    ggml_tensor * scores = ggml_mul_mat(ctx, Qf, Kf); // Q^T @ K = [n_tokens, n_tokens]
-
-    // Scale
-    scores = ggml_scale(ctx, scores, 1.0f / sqrtf((float)head_dim));
-
-    // Clamp to prevent softmax overflow (limit to ±30 before exp)
-    scores = ggml_clamp(ctx, scores, -30.0f, 30.0f);
-
-    // Softmax
-    scores = ggml_soft_max(ctx, scores);
-
-    // scores @ V: scores [n_tokens, n_tokens], V [hidden, n_tokens]
-    // Want: [n_tokens, hidden] = scores^T @ V^T? No
-    // scores [n_tokens, n_tokens], V [hidden, n_tokens] -> V^T [n_tokens, hidden]
-    // result = scores @ V^T = [n_tokens, n_tokens] @ [n_tokens, hidden] = [n_tokens, hidden]
-    // mul_mat(V^T, scores^T)? 
-    // mul_mat(scores, V^T): scores [n_tokens, n_tokens], V^T [n_tokens, hidden] -> [n_tokens, hidden]
-    ggml_tensor * Vt = ggml_cont(ctx, ggml_permute(ctx, Vf, 1, 0, 2, 3)); // [n_tokens, hidden]
-    ggml_tensor * attn_out = ggml_mul_mat(ctx, scores, Vt); // [n_tokens, hidden]
-
-    // Output projection
-    attn_out = ggml_cont(ctx, ggml_permute(ctx, attn_out, 1, 0, 2, 3)); // [hidden, n_tokens]
+    // Multi-head attention: per-head softmax(Q_h @ K_h^T / sqrt(d)) @ V_h
+    // Q, K, V after RoPE: each [hidden, n_tokens] = [n_heads*head_dim, n_tokens]
+    // Reshape to [n_heads, head_dim, n_tokens] for per-head processing
+    q = ggml_cont(ctx, ggml_permute(ctx, q, 1, 2, 0, 3)); // [n_heads, head_dim, n_tokens]
+    k = ggml_cont(ctx, ggml_permute(ctx, k, 1, 2, 0, 3));
+    v = ggml_cont(ctx, ggml_permute(ctx, v, 1, 2, 0, 3));
+    
+    float scale = 1.0f / sqrtf((float)head_dim);
+    int n_tokens_total = seq_len * n_batch;
+    
+    // Allocate output buffer [hidden, n_tokens]
+    ggml_tensor * attn_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens_total, hidden);
+    float * out_data = (float*)attn_out->data;
+    
+    for (int h = 0; h < n_heads; h++) {
+        // Extract head h: [head_dim, n_tokens]
+        ggml_tensor * qh = ggml_view_2d(ctx, q, head_dim, n_tokens_total, q->nb[1], h * head_dim * sizeof(float));
+        ggml_tensor * kh = ggml_view_2d(ctx, k, head_dim, n_tokens_total, k->nb[1], h * head_dim * sizeof(float));
+        ggml_tensor * vh = ggml_view_2d(ctx, v, head_dim, n_tokens_total, v->nb[1], h * head_dim * sizeof(float));
+        
+        // scores = Q_h^T @ K_h: Q^T [n_tokens, head_dim] @ K [head_dim, n_tokens] -> [n_tokens, n_tokens]
+        ggml_tensor * qht = ggml_cont(ctx, ggml_permute(ctx, qh, 1, 0, 2, 3)); // [n_tokens, head_dim]
+        ggml_tensor * scores = ggml_mul_mat(ctx, qht, kh); // Q^T @ K
+        scores = ggml_scale(ctx, scores, scale);
+        scores = ggml_clamp(ctx, scores, -30.0f, 30.0f);
+        scores = ggml_soft_max(ctx, scores);
+        
+        // output_h = scores @ V_h^T? No: scores [n_tokens, n_tokens], V [head_dim, n_tokens]
+        // Want: V @ scores^T? No, standard: attn @ V where attn = [n_tokens, n_tokens], V = [n_tokens, head_dim]
+        // We have V_h [head_dim, n_tokens], transpose to [n_tokens, head_dim]
+        ggml_tensor * vht = ggml_cont(ctx, ggml_permute(ctx, vh, 1, 0, 2, 3)); // [n_tokens, head_dim]
+        // scores @ V = [n_tokens, n_tokens] @ [n_tokens, head_dim] -> [n_tokens, head_dim]
+        ggml_tensor * out_h = ggml_mul_mat(ctx, scores, vht);
+        // Transpose back: [n_tokens, head_dim] -> [head_dim, n_tokens]
+        out_h = ggml_cont(ctx, ggml_permute(ctx, out_h, 1, 0, 2, 3));
+        
+        // Compute this head
+        ggml_cgraph * cg = ggml_new_graph(ctx);
+        ggml_build_forward_expand(cg, out_h);
+        ggml_graph_compute_with_ctx(ctx, cg, 1);
+        
+        // Copy to output buffer: output[h * head_dim : (h+1) * head_dim, :]
+        float * head_data = (float*)out_h->data;
+        for (int i = 0; i < head_dim; i++)
+            memcpy(out_data + (h * head_dim + i) * n_tokens_total,
+                   head_data + i * n_tokens_total, n_tokens_total * sizeof(float));
+    }
+    
+    // Output projection: [hidden, n_tokens] @ o_weight -> [hidden, n_tokens]
     attn_out = ggml_mul_mat(ctx, o_weight, attn_out);
 
     return attn_out;
