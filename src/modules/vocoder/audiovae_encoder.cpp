@@ -254,14 +254,14 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
             memcpy(x_block, conv_out, out_C * new_T * sizeof(float));
             
             // LeakyReLU → dilated conv → LeakyReLU → undilated conv
-            leaky_relu(x_block, out_C * new_T);
+            leaky_relu(x_block, out_C * new_T, 0.01f);
             
             float * tmp = new float[out_C * new_T];
             conv1d_causal_pt(tmp, x_block, out_C, new_T,
                             w.rs_w1_v[s][d], w.rs_b1[s][d],
                             out_C, 3, 1, dil);
             
-            leaky_relu(tmp, out_C * new_T);
+            leaky_relu(tmp, out_C * new_T, 0.01f);
             conv1d_causal_pt(tmp, tmp, out_C, new_T,
                             w.rs_w2_v[s][d], w.rs_b2[s][d],
                             out_C, 3, 1, 1);
