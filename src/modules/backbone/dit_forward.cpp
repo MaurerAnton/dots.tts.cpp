@@ -58,11 +58,16 @@ static ggml_tensor * dit_ffn(
     ggml_context * ctx,
     ggml_tensor * x,        // [hidden, N]  (flattened batch*seq)
     ggml_tensor * w1,       // [ffn, hidden]
-    ggml_tensor * w2        // [hidden, ffn]
+    ggml_tensor * w2,       // [hidden, ffn]
+    ggml_tensor * b1,       // [ffn]
+    ggml_tensor * b2        // [hidden]
 ) {
     ggml_tensor * h = ggml_mul_mat(ctx, w1, x);
+    if (b1) h = ggml_add(ctx, h, b1);
     h = ggml_silu(ctx, h);
-    return ggml_mul_mat(ctx, w2, h);
+    h = ggml_mul_mat(ctx, w2, h);
+    if (b2) h = ggml_add(ctx, h, b2);
+    return h;
 }
 
 // ===========================================================================
@@ -440,7 +445,7 @@ static ggml_tensor * dit_block_forward_simple(
     h = ggml_mul(ctx, scale_p1, h);
     h = ggml_add(ctx, h, shift_mlp_tok);
 
-    ggml_tensor * ffn = dit_ffn(ctx, h, block.ffn_w1, block.ffn_w2);
+    ggml_tensor * ffn = dit_ffn(ctx, h, block.ffn_w1, block.ffn_w2, block.ffn_b1, block.ffn_b2);
     x = ggml_add(ctx, x, ggml_mul(ctx, gate_mlp_tok, ffn));
 
     return x;
