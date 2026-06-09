@@ -174,8 +174,31 @@ int main(int argc, char ** argv) {
             ggml_tensor * spk = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, 512, 1); memcpy(tensor_data(spk), spk_emb, 512 * sizeof(float));
             ggml_tensor * dout = dit_forward(dit, gctx, dx, ti, spk);
             { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
-            float * vdata = tensor_data(dout); bool has_nan = false;
-            for (int i = 0; i < patch_flat; i++) { v_t[i] = vdata[i]; if (std::isnan(v_t[i]) || std::isinf(v_t[i])) { has_nan = true; break; } }
+            float * vdata = tensor_data(dout);
+            // DUMP DiT input/output for first call, first step
+            if (call == 0 && step == 0) {
+                float * idata = tensor_data(dx);
+                FILE * df = fopen("debug/dit_input.bin", "wb");
+                if(df){fwrite(idata,sizeof(float),cond_seq*DIT_HIDDEN_SIZE,df);fclose(df);}
+                int out_n = cond_seq * VAE_LATENT_DIM;
+                df = fopen("debug/dit_output.bin", "wb");
+                if(df){fwrite(vdata,sizeof(float),out_n,df);fclose(df);}
+                float ir=0, ora=0; for(int i=0;i<cond_seq*DIT_HIDDEN_SIZE;i++)ir+=idata[i]*idata[i];
+                for(int i=0;i<out_n;i++)ora+=vdata[i]*vdata[i];
+                printf("  DiT dump: input rms=%.4f output rms=%.4f (len=%d)\\n",
+                    sqrtf(ir/(cond_seq*DIT_HIDDEN_SIZE)), sqrtf(ora/out_n), out_n);
+            }
+            bool has_nan = false;
+            // Extract velocity for noise positions (noise_pos .. noise_pos+patch_size-1)
+            // vdata layout: [VAE_LATENT_DIM=128, cond_seq] = [ch * cond_seq + t]
+            for (int p = 0; p < patch_size; p++) {
+                int t_idx = noise_pos + p;
+                for (int c = 0; c < VAE_LATENT_DIM; c++) {
+                    float val = vdata[c * cond_seq + t_idx];
+                    v_t[p * VAE_LATENT_DIM + c] = val;
+                    if (std::isnan(val) || std::isinf(val)) has_nan = true;
+                }
+            }
             if (has_nan) { printf("(NaN) "); for (int i=0;i<patch_flat;i++){float z=randn();if(z>5)z=5;if(z<-5)z=-5;z_t[i]=z;} history_len=0; break; }
             // CFG: blend with null-conditioning velocity for better quality
             if (cfg_scale > 1.001f && dit.hidden_proj_b && !has_nan) {
