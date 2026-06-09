@@ -300,6 +300,9 @@ static ggml_tensor * dit_attention(
     // Scale
     scores = ggml_scale(ctx, scores, 1.0f / sqrtf((float)head_dim));
 
+    // Clamp to prevent softmax overflow (limit to ±30 before exp)
+    scores = ggml_clamp(ctx, scores, -30.0f, 30.0f);
+
     // Softmax
     scores = ggml_soft_max(ctx, scores);
 

@@ -276,12 +276,39 @@ bool bigvgan_load(const char * sf_path, BigVGANDecoder & dec) {
     sf.close();
 
     int loaded = 0;
-    if (dec.conv_pre_w.data.size() > 0) loaded++;
-    if (dec.conv_post_w.data.size() > 0) loaded++;
-    for (int i = 0; i < 6; i++) if (dec.ups_w[i].data.size() > 0) loaded++;
-    for (int i = 0; i < 18; i++)
-        for (int j = 0; j < 3; j++)
-            if (dec.rb_conv1_w[i][j].data.size() > 0) loaded++;
+    auto inc_if = [&](const BigVGANTensor & t) { if (t.data.size() > 0) loaded++; };
+    inc_if(dec.conv_pre_w);
+    inc_if(dec.conv_pre_b);
+    inc_if(dec.conv_post_w);
+    for (int i = 0; i < 6; i++) { inc_if(dec.ups_w[i]); inc_if(dec.ups_b[i]); }
+    for (int i = 0; i < 18; i++) {
+        for (int j = 0; j < 3; j++) {
+            inc_if(dec.rb_conv1_w[i][j]);
+            inc_if(dec.rb_conv1_b[i][j]);
+            inc_if(dec.rb_conv2_w[i][j]);
+            inc_if(dec.rb_conv2_b[i][j]);
+        }
+        for (int a = 0; a < 6; a++) {
+            inc_if(dec.rb_alpha[i][a]);
+            inc_if(dec.rb_beta[i][a]);
+        }
+    }
+    inc_if(dec.act_post_alpha);
+    inc_if(dec.act_post_beta);
+    inc_if(dec.act_post_filter_up);
+    inc_if(dec.act_post_filter_down);
+    inc_if(dec.post_proj_w);
+    inc_if(dec.post_proj_b);
+    inc_if(dec.mi_w1);
+    inc_if(dec.mi_b1);
+    inc_if(dec.mi_w2);
+    inc_if(dec.mi_b2);
+    for (int l = 0; l < 4; l++) {
+        inc_if(dec.mi_lstm_w_ih[l]);
+        inc_if(dec.mi_lstm_w_hh[l]);
+        inc_if(dec.mi_lstm_b_ih[l]);
+        inc_if(dec.mi_lstm_b_hh[l]);
+    }
     printf("  BigVGAN C++ v2: %d tensors loaded\n", loaded);
     return loaded > 10;
 }

@@ -2,7 +2,9 @@
 
 First C++ implementation of [dots.tts](https://github.com/rednote-hilab/dots.tts) — a 2B-parameter multilingual text-to-speech model with 24-language support (including Russian, English, German), zero-shot voice cloning, and 48kHz output.
 
-**Status: Phase 1 MVP** — DiT + Flow Matching + PatchEncoder compile, build graphs, and execute correctly on CPU via ggml.
+**Status: Active development / testing & polishing** — The full pipeline (BPE → LLM → PatchEncoder → DiT → VAE → BigVGAN) is implemented end-to-end. Currently refining output quality, verifying against the Python reference, and polishing the codebase.
+
+**Phase 1 MVP** — DiT + Flow Matching + PatchEncoder compile, build graphs, and execute correctly on CPU via ggml.
 
 ## Architecture
 
