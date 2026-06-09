@@ -21,7 +21,7 @@ float wn_scale(float g, const float * v, int n) {
 
 // PyTorch-compatible causal Conv1d (forward sliding: pt = t + k)
 // Different from BigVGAN's backward-sliding conv!
-static void conv1d_causal_pt(float * out, const float * in, int C_in, int T,
+void conv1d_causal_pt(float * out, const float * in, int C_in, int T,
                               const float * w, const float * bias,
                               int C_out, int K, int stride, int dilation) {
     int left_pad = dilation * (K - 1);
@@ -36,7 +36,7 @@ static void conv1d_causal_pt(float * out, const float * in, int C_in, int T,
         for (int t = 0; t < T_out; t++) {
             float s = b;
             for (int k = 0; k < K; k++) {
-                int pt = t * stride + k;  // FORWARD sliding
+                int pt = t * stride + k * dilation;  // FORWARD sliding with dilation
                 for (int c = 0; c < C_in; c++)
                     s += padded[c * padded_T + pt] * w[(o * C_in + c) * K + k];
             }
@@ -238,39 +238,39 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
         conv1d_causal_pt(conv_out, cur, in_C, cur_T,
                          w.stage_conv_wv[s], w.stage_conv_bias[s],
                          out_C, K, stride, 1);
+        { float rms=0; for(int i=0;i<out_C*new_T;i++) rms+=conv_out[i]*conv_out[i];
+          printf("  stage%d conv: rms=%.4f len=%d\n", s, sqrtf(rms/(out_C*new_T)), new_T); }
         
         // ResStack: 6 dilated residual blocks
         for (int d = 0; d < 6; d++) {
             int dil = 1 << d; // 1, 2, 4, 8, 16, 32
             
-            // Save input for residual
-            float * residual = new float[out_C * new_T];
-            memcpy(residual, conv_out, out_C * new_T * sizeof(float));
+            // Save ORIGINAL for residual connection (don't modify!)
+            float * orig = new float[out_C * new_T];
+            memcpy(orig, conv_out, out_C * new_T * sizeof(float));
+            
+            // Block input: copy of current (will be mutated by LeakyReLU)
+            float * x_block = new float[out_C * new_T];
+            memcpy(x_block, conv_out, out_C * new_T * sizeof(float));
             
             // LeakyReLU → dilated conv → LeakyReLU → undilated conv
-            // NOTE: The Python code applies LeakyReLU BEFORE each conv in ResStack
-            // But the weight layout has layers.d.2 (first conv) and layers.d.5 (second conv)
-            // with LeakyReLU in between
+            leaky_relu(x_block, out_C * new_T);
             
             float * tmp = new float[out_C * new_T];
-            
-            // First part: LeakyReLU + dilated conv
-            leaky_relu(residual, out_C * new_T);
-            conv1d_causal_pt(tmp, residual, out_C, new_T,
+            conv1d_causal_pt(tmp, x_block, out_C, new_T,
                             w.rs_w1_v[s][d], w.rs_b1[s][d],
                             out_C, 3, 1, dil);
             
-            // LeakyReLU + undilated conv
             leaky_relu(tmp, out_C * new_T);
             conv1d_causal_pt(tmp, tmp, out_C, new_T,
                             w.rs_w2_v[s][d], w.rs_b2[s][d],
                             out_C, 3, 1, 1);
             
-            // Residual: conv_out = residual + block_output
+            // Residual: conv_out = ORIGINAL + block_output
             for (int i = 0; i < out_C * new_T; i++)
-                conv_out[i] = residual[i] + tmp[i];
+                conv_out[i] = orig[i] + tmp[i];
             
-            delete[] tmp;
+            delete[] orig; delete[] x_block; delete[] tmp;
         }
         
         // LeakyReLU after ResStack
