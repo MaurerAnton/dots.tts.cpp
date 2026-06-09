@@ -1,6 +1,6 @@
 # dots.tts.cpp
 
-First C++ implementation of [dots.tts](https://github.com/rednote-hilab/dots.tts) — a 2.4B-parameter multilingual text-to-speech model with 24-language support (including Russian, English, German), zero-shot voice cloning, and 48kHz output.
+First C++ implementation of [dots.tts](https://github.com/rednote-hilab/dots.tts) — a 2,386,160,990-parameter multilingual text-to-speech model with 24-language support (including Russian, English, German), zero-shot voice cloning, and 48kHz output.
 
 **Status: Active development / testing & polishing** — The full pipeline (BPE → LLM → PatchEncoder → DiT → VAE → BigVGAN) is implemented end-to-end. Currently refining output quality, verifying against the Python reference, and polishing the codebase.
 
@@ -17,13 +17,13 @@ Text -> BPE Tokenizer -> Qwen2.5-1.5B LLM -> PatchEncoder
 
 | Component | Layers | Hidden | Params | Status |
 |-----------|--------|--------|--------|--------|
-| **DiT** (flow-matching head) | 18 | 1024 | 346.9M | Done |
-| **PatchEncoder** (VAE semantic encoder) | 24 | 1024 | 305.5M | Done |
+| **DiT** (flow-matching head) | 18 | 1024 | 346,920,320 | Done |
+| **PatchEncoder** (VAE semantic encoder) | 24 | 1024 | 305,498,752 | Done |
 | **Flow Matching ODE** (Euler, Midpoint, CFG) | - | - | - | Done |
-| **AudioVAE encoder** (7 Conv1d stages) | 7 | - | 44.4M | TODO |
-| **BigVGAN decoder** (6 upsampling + 18 AMP blocks) | 6 | - | 136.5M | Done |
-| **LLM backbone** (Qwen2.5-1.5B) | 28 | 1536 | 1,543M | Reuses llama.cpp |
-| **CAM++** (speaker encoder) | - | 512 | ~7.2M | TODO |
+| **AudioVAE encoder** (7 Conv1d stages) | 7 | - | 44,360,140 | TODO |
+| **BigVGAN decoder** (6 upsampling + 18 AMP blocks) | 6 | - | 136,509,072 | Done |
+| **LLM backbone** (Qwen2.5-1.5B) | 28 | 1536 | 1,545,672,706 | Reuses llama.cpp |
+| **CAM++** (speaker encoder) | - | 512 | ~7,200,000 | TODO |
 | **BPE Tokenizer** | - | vocab=151,936 | - | Reuses llama.cpp |
 
 ### What works now
