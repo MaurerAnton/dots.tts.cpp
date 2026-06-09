@@ -124,7 +124,7 @@ int main(int argc, char ** argv) {
 
     // === Conditioning ===
     printf("[3] Conditioning...\n");
-    ggml_init_params gp = { .mem_size = 512ULL*1024*1024 };
+    ggml_init_params gp = { .mem_size = 1ULL*1024*1024*1024 };
     ggml_context * gctx = ggml_init(gp);
     ggml_tensor * ht = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, n_tok);
     memcpy(tensor_data(ht), hiddens, n_tok * n_embd * sizeof(float)); delete[] hiddens;
