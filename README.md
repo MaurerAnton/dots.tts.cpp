@@ -32,7 +32,7 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 | **PatchEncoder** (semantic encoder) | 24 | 1024 | 305,498,752 | Done |
 | **BigVGAN decoder** | 6 stages, 18 AMP blocks | — | 136,509,072 | Done |
 | **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | Done |
-| **CAM++** (speaker encoder) | — | 512 | 7,259,203 | Done |
+| **CAM++** (speaker encoder) | 53 D-TDNN | 512 | 7,259,203 | Done |
 | **BPE Tokenizer** | — | [vocab=151,672](models/token_vocab.txt#L151672) | — | Via llama.cpp |
 | **Total** | | | **2,386,220,193** | |
 
