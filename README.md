@@ -33,7 +33,7 @@ Text → BPE Tokenizer → LLM (Qwen2.5-1.5B) → hidden_proj
 | **BigVGAN decoder** | 6 stages, 18 AMP blocks | — | 136,509,072 | Done |
 | **AudioVAE encoder** | 7 Conv1d stages | — | 44,360,140 | TODO |
 | **CAM++** (speaker encoder) | — | 512 | 7,259,203 | TODO |
-| **BPE Tokenizer** | — | vocab=151,936 | — | Via llama.cpp |
+| **BPE Tokenizer** | — | [vocab=151,672](models/token_vocab.txt#L151672) | — | Via llama.cpp |
 | **Total** | | | **2,386,220,193** | |
 
 ### DiT (flow-matching head)
