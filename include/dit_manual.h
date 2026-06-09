@@ -11,7 +11,16 @@
 #include <cstdio>
 #include <algorithm>
 
-// RMS Norm
+// LayerNorm (NOT RMS norm!): out = (x - mean) / sqrt(var + eps)
+// elementwise_affine=False for norm1/norm2, so no weight/bias
+inline void manual_layernorm(float * out, const float * x, int n) {
+    float mean = 0; for (int i = 0; i < n; i++) mean += x[i]; mean /= n;
+    float var = 0; for (int i = 0; i < n; i++) { float d = x[i] - mean; var += d * d; }
+    float inv_std = 1.0f / sqrtf(var / n + 1e-5f);
+    for (int i = 0; i < n; i++) out[i] = (x[i] - mean) * inv_std;
+}
+
+// RMS Norm (used for qk_norm inside attention)
 inline void manual_rms_norm(float * out, const float * x, const float * weight, int n) {
     float ss = 0; for (int i = 0; i < n; i++) ss += x[i] * x[i];
     float inv = 1.0f / sqrtf(ss / n + 1e-6f);
@@ -77,15 +86,17 @@ inline void manual_attention(float * out, const float * x,
 inline void manual_dit_block(const float * x_in, const float * cond, const dit_block & block,
     float * out, int n_tokens) {
     int hidden = DIT_HIDDEN_SIZE;
-    float cs[1024]; for(int i=0;i<1024;i++) cs[i]=cond[i]/(1.0f+expf(-cond[i]));
-    float adaln_raw[6*DIT_HIDDEN_SIZE];
+    float * cs = new float[1024]; for(int i=0;i<1024;i++) cs[i]=cond[i]/(1.0f+expf(-cond[i]));
+    float * adaln_raw = new float[6*DIT_HIDDEN_SIZE];
     { float * aw = tensor_data(block.adaln_linear_w); float * ab = block.adaln_linear_b?tensor_data(block.adaln_linear_b):nullptr;
       for(int o=0;o<6*hidden;o++){ float s=ab?ab[o]:0.0f; for(int i=0;i<DIT_HIDDEN_SIZE;i++) s+=aw[o*DIT_HIDDEN_SIZE+i]*cs[i]; adaln_raw[o]=s; } }
     float * sm=adaln_raw, * scm=adaln_raw+hidden, * gm=adaln_raw+2*hidden;
     float * sml=adaln_raw+3*hidden, * scl=adaln_raw+4*hidden, * gml=adaln_raw+5*hidden;
     float * normed = new float[n_tokens*hidden], * mod = new float[n_tokens*hidden], * ao = new float[n_tokens*hidden];
-    for(int t=0;t<n_tokens;t++){ manual_rms_norm(normed+t*hidden, x_in+t*hidden, block.attn_norm_w?tensor_data(block.attn_norm_w):nullptr, hidden);
-        for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scm[i])+sm[i]; }
+    for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, x_in+t*hidden, hidden);
+        if(t==0){ float r=0; for(int i=0;i<hidden;i++){ float v=normed[i]*(1.0f+scm[i])+sm[i]; r+=v*v; mod[t*hidden+i]=v; }
+          fprintf(stderr,"  manual_mod t0: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), mod[0], mod[1], mod[2]); }
+        else for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scm[i])+sm[i]; }
     manual_attention(ao, mod, tensor_data(block.attn_q_weight), tensor_data(block.attn_k_weight),
         tensor_data(block.attn_v_weight), tensor_data(block.attn_o_weight),
         nullptr,nullptr,nullptr, block.attn_o_bias?tensor_data(block.attn_o_bias):nullptr,
@@ -93,7 +104,7 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
         n_tokens,hidden,DIT_NUM_HEADS,DIT_HEAD_SIZE);
     float * h = new float[n_tokens*hidden];
     for(int i=0;i<n_tokens*hidden;i++) h[i]=x_in[i]+gm[i%hidden]*ao[i];
-    for(int t=0;t<n_tokens;t++){ manual_rms_norm(normed+t*hidden, h+t*hidden, block.ffn_norm_w?tensor_data(block.ffn_norm_w):nullptr, hidden);
+    for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, h+t*hidden, hidden);
         for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scl[i])+sml[i]; }
     float * fh1 = new float[n_tokens*DIT_FFN_SIZE], * fh2 = new float[n_tokens*hidden];
     float * fw1=tensor_data(block.ffn_w1), * fw2=tensor_data(block.ffn_w2);
@@ -102,12 +113,27 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
         for(int i=0;i<DIT_FFN_SIZE;i++){ float xv=fh1[t*DIT_FFN_SIZE+i]; fh1[t*DIT_FFN_SIZE+i]=xv/(1.0f+expf(-xv)); }
         manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden); }
     for(int i=0;i<n_tokens*hidden;i++) out[i]=h[i]+gml[i%hidden]*fh2[i];
-    // DEBUG: dump intermediates for first call
+    // DEBUG
     { static int cnt=0; if(cnt==0){
-        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=mod[i]*mod[i];
-        fprintf(stderr,"  manual_mod: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        float r=0;
+        fprintf(stderr,"  manual_x_in: first10=[%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f]\n",
+            x_in[0], x_in[1], x_in[2], x_in[3], x_in[4], x_in[5], x_in[6], x_in[7], x_in[8], x_in[9]);
+        for(int i=0;i<n_tokens*hidden;i++) r+=normed[i]*normed[i];
+        fprintf(stderr,"  manual_normed: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/(n_tokens*hidden)), normed[0], normed[1], normed[2]);
+        r=0; for(int i=0;i<hidden;i++) r+=sm[i]*sm[i];
+        fprintf(stderr,"  manual_shift: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/hidden), sm[0], sm[1], sm[2]);
+        r=0; for(int i=0;i<hidden;i++) r+=scm[i]*scm[i];
+        fprintf(stderr,"  manual_scale: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/hidden), scm[0], scm[1], scm[2]);
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=mod[i]*mod[i];
+        fprintf(stderr,"  manual_mod: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/(n_tokens*hidden)), mod[0], mod[1], mod[2]);
         r=0; for(int i=0;i<n_tokens*hidden;i++) r+=ao[i]*ao[i];
-        fprintf(stderr,"  manual_attn: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        fprintf(stderr,"  manual_attn: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/(n_tokens*hidden)), ao[0], ao[1], ao[2]);
     } cnt++; }
+    delete[] cs; delete[] adaln_raw;
     delete[] normed; delete[] mod; delete[] ao; delete[] h; delete[] fh1; delete[] fh2;
 }

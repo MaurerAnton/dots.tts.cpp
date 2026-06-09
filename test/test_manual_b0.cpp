@@ -52,6 +52,20 @@ int main() {
     float cpp_out[8192];
     manual_dit_block(py_x_in, cond, m.layers[0], cpp_out, 8);
 
+    // Verify LayerNorm manually
+    {
+        const float * tok0 = py_x_in;
+        // Test manual_layernorm directly
+        float dir_normed[3]; manual_layernorm(dir_normed, tok0, 1024);
+        float mean = 0; for (int i = 0; i < 1024; i++) mean += tok0[i]; mean /= 1024;
+        float var = 0; for (int i = 0; i < 1024; i++) { float d = tok0[i] - mean; var += d * d; }
+        float inv_std = 1.0f / sqrtf(var / 1024 + 1e-5f);
+        float normed[3];
+        for (int i = 0; i < 3; i++) normed[i] = (tok0[i] - mean) * inv_std;
+        fprintf(stderr, "  test_normed: first3=[%.4f,%.4f,%.4f]\n", normed[0], normed[1], normed[2]);
+        fprintf(stderr, "  dir_normed: first3=[%.4f,%.4f,%.4f]\n", dir_normed[0], dir_normed[1], dir_normed[2]);
+    }
+
     // Compare
     float r_cpp=0, r_py=0, md=0;
     for(int i=0;i<8192;i++){ r_cpp+=cpp_out[i]*cpp_out[i]; r_py+=py_out[i]*py_out[i];
