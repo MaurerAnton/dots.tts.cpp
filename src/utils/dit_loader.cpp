@@ -19,6 +19,7 @@ bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m)
     // Zero-initialize model-level pointers (resize() handles block-level)
     m.t_embed_b1 = m.t_embed_b2 = nullptr;
     m.spk_proj_b1 = m.spk_proj_b2 = nullptr;
+    m.spk_ln_w = m.spk_ln_b = nullptr;
     m.out_adaln_b = nullptr;
     m.out_proj_b = m.hidden_proj_b = m.latent_proj_b = m.coord_proj_b = nullptr;
     m.input_layer_b = nullptr;
@@ -87,6 +88,8 @@ bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m)
 
     load("xvec_proj.0.weight", m.spk_proj_w1);
     load("xvec_proj.0.bias",   m.spk_proj_b1);
+    load("xvec_proj.1.weight", m.spk_ln_w);
+    load("xvec_proj.1.bias",   m.spk_ln_b);
 
     load("velocity_field_predictor.output_layer.linear.weight", m.out_proj_w);
     load("velocity_field_predictor.output_layer.linear.bias",   m.out_proj_b);

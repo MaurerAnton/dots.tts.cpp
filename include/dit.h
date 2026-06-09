@@ -105,6 +105,8 @@ struct dit_model {
     ggml_tensor * spk_proj_b1;
     ggml_tensor * spk_proj_w2;  // [ada_dim=1024]
     ggml_tensor * spk_proj_b2;
+    ggml_tensor * spk_ln_w;     // [1024] LayerNorm weight (xvec_proj.1)
+    ggml_tensor * spk_ln_b;     // [1024] LayerNorm bias
 
     // output layer (adaLN norm + linear -> latent_dim)
     ggml_tensor * out_adaln_w;  // [2*hidden_size, ada_dim] — output adaLN

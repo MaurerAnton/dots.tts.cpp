@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Anton Maurer
 // dots.tts.cpp - DiT forward pass for ggml
-// All biases applied. Time embedder + speaker computed manually.
+// Time embedder + speaker + adaLN computed manually (ggml graph issues with leaf tensors)
+// All biases applied. Matches Python reference.
 
 #include "dots_tts.h"
 #include "dots_tts_util.h"
@@ -22,8 +23,7 @@ ggml_tensor * dit_attention_multihead(
 
 // ===========================================================================
 // Manual time_embedder: sinusoidal(t,256) -> Linear(256->1024)+bias -> SiLU -> Linear(1024->1024)+bias
-// Computed in pure C++ because ggml graph was not computing the time_embedder branch.
-// Weight access: PyTorch W[o,i] = ggml_W at offset i + o * ne[0] (row-major, ne[0]=stride)
+// Python timestep_embedding: freqs=exp(-log(10000)*arange(0,half)/half), order=[cos, sin]
 // ===========================================================================
 
 static ggml_tensor * compute_time_embedding_manual(
@@ -35,28 +35,28 @@ static ggml_tensor * compute_time_embedding_manual(
 
     float sin_emb[256];
     for (int i = 0; i < half; i++) {
-        float freq = expf(-logf(10000.0f) * (float)i / (float)half);  // Python: / half, not / (half-1)
+        float freq = expf(-logf(10000.0f) * (float)i / (float)half);
         float arg = t_val * freq;
-        sin_emb[i] = cosf(arg);           // Python: [cos, sin] order
+        sin_emb[i] = cosf(arg);
         sin_emb[half + i] = sinf(arg);
     }
 
     // MLP layer 1: Linear(256 -> 1024) + bias + SiLU
     float h1[1024];
     {
-        float * w1 = tensor_data(model.t_embed_w1);
+        float * w1 = tensor_data(model.t_embed_w1);  // ne=[256,1024]
         float * b1 = model.t_embed_b1 ? tensor_data(model.t_embed_b1) : nullptr;
         for (int o = 0; o < 1024; o++) {
             float s = b1 ? b1[o] : 0.0f;
-            for (int i = 0; i < emb_dim; i++) s += w1[i + o * 256] * sin_emb[i];
-            h1[o] = s / (1.0f + expf(-s));  // SiLU
+            for (int i = 0; i < emb_dim; i++) s += w1[o * 256 + i] * sin_emb[i];
+            h1[o] = s / (1.0f + expf(-s));
         }
     }
 
     // MLP layer 2: Linear(1024 -> 1024) + bias
     float h2[1024];
     {
-        float * w2 = tensor_data(model.t_embed_w2);
+        float * w2 = tensor_data(model.t_embed_w2);  // ne=[1024,1024]
         float * b2 = model.t_embed_b2 ? tensor_data(model.t_embed_b2) : nullptr;
         for (int o = 0; o < 1024; o++) {
             float s = b2 ? b2[o] : 0.0f;
@@ -76,19 +76,17 @@ static ggml_tensor * compute_time_embedding_manual(
 // ===========================================================================
 
 static void compute_speaker_manual(dit_model & model, ggml_tensor * speaker_emb, float * out) {
-    float * sw1 = tensor_data(model.spk_proj_w1);
+    float * sw1 = tensor_data(model.spk_proj_w1);  // ne=[512,1024]
     float * sb1 = model.spk_proj_b1 ? tensor_data(model.spk_proj_b1) : nullptr;
     float * se = tensor_data(speaker_emb);
     float temp[1024];
 
-    // Step 1: Linear(512 -> 1024)
     for (int o = 0; o < 1024; o++) {
         float s = sb1 ? sb1[o] : 0.0f;
-        for (int i = 0; i < 512; i++) s += sw1[i + o * 512] * se[i];
+        for (int i = 0; i < 512; i++) s += sw1[o * 512 + i] * se[i];
         temp[o] = s;
     }
 
-    // Step 2: LayerNorm
     float mean = 0, var = 0;
     for (int i = 0; i < 1024; i++) mean += temp[i];
     mean /= 1024;
@@ -106,7 +104,7 @@ static void compute_speaker_manual(dit_model & model, ggml_tensor * speaker_emb,
 }
 
 // ===========================================================================
-// Timestep embedding (kept for reference/testing)
+// Timestep embedding (kept for reference)
 // ===========================================================================
 
 ggml_tensor * dit_timestep_embedding(ggml_context * ctx, ggml_tensor * t, int dim) {
@@ -116,10 +114,10 @@ ggml_tensor * dit_timestep_embedding(ggml_context * ctx, ggml_tensor * t, int di
     for (int b = 0; b < n_batch; b++) {
         float t_val = td[b];
         for (int i = 0; i < half_dim; i++) {
-            float freq = expf(-logf(10000.0f) * (float)i / (float)(half_dim > 1 ? half_dim - 1 : 1));
+            float freq = expf(-logf(10000.0f) * (float)i / (float)half_dim);
             float arg = t_val * freq;
-            ed[b * dim + i] = sinf(arg);
-            ed[b * dim + half_dim + i] = cosf(arg);
+            ed[b * dim + i] = cosf(arg);
+            ed[b * dim + half_dim + i] = sinf(arg);
         }
     }
     return emb;
@@ -141,7 +139,7 @@ static ggml_tensor * dit_ffn(ggml_context * ctx, ggml_tensor * x,
 }
 
 // ===========================================================================
-// DiT Block
+// DiT Block (adaLN computed manually)
 // ===========================================================================
 
 static ggml_tensor * dit_block_forward_simple(ggml_context * ctx,
@@ -149,18 +147,11 @@ static ggml_tensor * dit_block_forward_simple(ggml_context * ctx,
 {
     int hidden = DIT_HIDDEN_SIZE, n_tokens = seq_len * n_batch;
 
-    // adaLN: compute MANUALLY (ggml graph fails with leaf cond)
-    // Python: adaLN_modulation = Sequential(SiLU(), Linear(1024, 6144))
-    // So: apply SiLU to cond first, then matmul
+    // adaLN: Sequential(SiLU(), Linear(1024, 6144)) — compute manually
     float cond_silu[1024];
     {
         float * cd = tensor_data(cond);
         for (int i = 0; i < 1024; i++) cond_silu[i] = cd[i] / (1.0f + expf(-cd[i]));
-        float r = 0; for (int i = 0; i < 1024; i++) r += cond_silu[i]*cond_silu[i];
-        static int cnt = 0;
-        if (cnt == 0) fprintf(stderr, "  block0 cond rms=%.4f silu_rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/1024), cnt, cond_silu[0], cond_silu[1], cond_silu[2]);
-        cnt++;
     }
     float adaln_raw[6 * DIT_HIDDEN_SIZE];
     {
@@ -168,17 +159,12 @@ static ggml_tensor * dit_block_forward_simple(ggml_context * ctx,
         float * ab = block.adaln_linear_b ? tensor_data(block.adaln_linear_b) : nullptr;
         for (int o = 0; o < 6 * hidden; o++) {
             float s = ab ? ab[o] : 0.0f;
-            for (int i = 0; i < DIT_HIDDEN_SIZE; i++) s += aw[i + o * DIT_HIDDEN_SIZE] * cond_silu[i];
+            for (int i = 0; i < DIT_HIDDEN_SIZE; i++) s += aw[o * DIT_HIDDEN_SIZE + i] * cond_silu[i];
             adaln_raw[o] = s;
         }
     }
     ggml_tensor * adaln = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 6 * hidden, 1);
     memcpy(tensor_data(adaln), adaln_raw, 6 * hidden * sizeof(float));
-    // DEBUG
-    { float r = 0; for (int i = 0; i < 6*hidden; i++) r += adaln_raw[i]*adaln_raw[i];
-      fprintf(stderr, "  adaLN manual: rms=%.4f first5=[%.4f,%.4f,%.4f,%.4f,%.4f] has_nan=%d\n",
-          sqrtf(r/(6*hidden)), adaln_raw[0], adaln_raw[1], adaln_raw[2], adaln_raw[3], adaln_raw[4],
-          (int)std::isnan(adaln_raw[0])); }
 
     int stride = hidden;
     ggml_tensor * sm = ggml_view_2d(ctx, adaln, hidden, n_batch, adaln->nb[1], 0);
@@ -238,29 +224,19 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
     x = ggml_cont(ctx, ggml_permute(ctx, x, 2, 0, 1, 3));
     x = ggml_reshape_2d(ctx, x, hidden, n_tokens);
 
-    // Time embedding (manual, leaf tensor)
+    // Time embedding + speaker (manual leaf tensors)
     ggml_tensor * t_emb = compute_time_embedding_manual(ctx, t, model);
-
-    // Speaker conditioning (manual, merged into new leaf tensor)
-    // NOTE: xvec_proj = Sequential(Linear(512,1024), LayerNorm(1024))
-    // Currently loading only first layer; TODO: add LayerNorm
     ggml_tensor * cond;
     if (speaker_emb && model.spk_proj_w1) {
         float spk_vals[1024];
         compute_speaker_manual(model, speaker_emb, spk_vals);
-        // Manual add: t_emb + spk
         float * te = tensor_data(t_emb);
         cond = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE, n_batch);
         float * cd = tensor_data(cond);
         for (int i = 0; i < 1024; i++) cd[i] = te[i] + spk_vals[i];
-        { float r = 0; for (int i = 0; i < 1024; i++) r += spk_vals[i]*spk_vals[i];
-          fprintf(stderr, "  speaker g_cond rms=%.4f first3=[%.4f,%.4f,%.4f] ln_w=%s ln_b=%s\n",
-              sqrtf(r/1024), spk_vals[0], spk_vals[1], spk_vals[2],
-              model.spk_ln_w ? "LOADED" : "NULL", model.spk_ln_b ? "LOADED" : "NULL"); }
     } else {
         cond = t_emb;
     }
-    // NOTE: no SiLU on cond — Python vfp.forward does NOT apply SiLU to c.
 
     // Input layer
     if (model.input_layer_w) {
@@ -271,10 +247,9 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
     for (int i = 0; i < model.n_layers; i++)
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
 
-    // Output
+    // Output adaLN (manual)
     ggml_tensor * out = x;
     if (model.out_adaln_w) {
-        // Compute output adaLN manually (same pattern as block adaLN)
         float cond_silu[1024];
         { float * cd = tensor_data(cond); for (int i = 0; i < 1024; i++) cond_silu[i] = cd[i] / (1.0f + expf(-cd[i])); }
         float mod_raw[2 * DIT_HIDDEN_SIZE];
@@ -283,7 +258,7 @@ ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
             float * ab = model.out_adaln_b ? tensor_data(model.out_adaln_b) : nullptr;
             for (int o = 0; o < 2 * hidden; o++) {
                 float s = ab ? ab[o] : 0.0f;
-                for (int i = 0; i < DIT_HIDDEN_SIZE; i++) s += aw[i + o * DIT_HIDDEN_SIZE] * cond_silu[i];
+                for (int i = 0; i < DIT_HIDDEN_SIZE; i++) s += aw[o * DIT_HIDDEN_SIZE + i] * cond_silu[i];
                 mod_raw[o] = s;
             }
         }
