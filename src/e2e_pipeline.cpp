@@ -233,7 +233,7 @@ int main(int argc, char ** argv) {
                 eb.pos[0] = n_tok + call; eb.n_seq_id[0] = 1; eb.seq_id[0][0] = 0; eb.logits[0] = 1;
                 memcpy(eb.embd, pe_data, n_embd * sizeof(float));
                 if (llama_decode(lctx, eb) == 0) {
-                    float * nh = llama_get_embeddings_ith(lctx, n_tok + call);
+                    float * nh = llama_get_embeddings_ith(lctx, 0); // batch index, not abs position
                     if (nh) { ggml_tensor * hn = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, 1); memcpy(tensor_data(hn), nh, n_embd*sizeof(float));
                         ggml_tensor * cn = ggml_mul_mat(gctx, dit.hidden_proj_w, hn); if (dit.hidden_proj_b) cn = ggml_add(gctx, cn, dit.hidden_proj_b);
                         { ggml_cgraph * cg = ggml_new_graph(gctx); ggml_build_forward_expand(cg, cn); ggml_graph_compute_with_ctx(gctx, cg, n_threads); }
