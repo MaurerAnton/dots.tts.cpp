@@ -11,20 +11,23 @@
 #include <cstdio>
 
 static void compute_time_embedding_manual(dit_model & model, float t_val, float * out) {
-    int half = 128; float sin_emb[256];
+    int half = 128;
+    float * sin_emb = new float[256];
     for (int i = 0; i < half; i++) { float freq = expf(-logf(10000.0f)*(float)i/(float)half);
         sin_emb[i] = cosf(t_val * freq); sin_emb[half + i] = sinf(t_val * freq); }
-    float h1[1024]; { float * w1 = tensor_data(model.t_embed_w1); float * b1 = model.t_embed_b1 ? tensor_data(model.t_embed_b1) : nullptr;
+    float * h1 = new float[1024];
+    { float * w1 = tensor_data(model.t_embed_w1); float * b1 = model.t_embed_b1 ? tensor_data(model.t_embed_b1) : nullptr;
       for (int o = 0; o < 1024; o++) { float s = b1 ? b1[o] : 0.0f;
           for (int i = 0; i < 256; i++) s += w1[o * 256 + i] * sin_emb[i]; h1[o] = s / (1.0f + expf(-s)); } }
     { float * w2 = tensor_data(model.t_embed_w2); float * b2 = model.t_embed_b2 ? tensor_data(model.t_embed_b2) : nullptr;
       for (int o = 0; o < 1024; o++) { float s = b2 ? b2[o] : 0.0f;
           for (int i = 0; i < 1024; i++) s += w2[o * 1024 + i] * h1[i]; out[o] = s; } }
+    delete[] sin_emb; delete[] h1;
 }
 
 static void compute_speaker_manual(dit_model & model, const float * speaker_emb, float * out) {
     float * sw1 = tensor_data(model.spk_proj_w1); float * sb1 = model.spk_proj_b1 ? tensor_data(model.spk_proj_b1) : nullptr;
-    float temp[1024];
+    float * temp = new float[1024];
     for (int o = 0; o < 1024; o++) { float s = sb1 ? sb1[o] : 0.0f; for (int i = 0; i < 512; i++) s += sw1[o * 512 + i] * speaker_emb[i]; temp[o] = s; }
     float mean = 0; for (int i = 0; i < 1024; i++) mean += temp[i]; mean /= 1024;
     float var = 0; for (int i = 0; i < 1024; i++) { float d = temp[i] - mean; var += d * d; } var = var / 1024 + 1e-5f;
@@ -32,15 +35,16 @@ static void compute_speaker_manual(dit_model & model, const float * speaker_emb,
     float * ln_w = model.spk_ln_w ? tensor_data(model.spk_ln_w) : nullptr;
     float * ln_b = model.spk_ln_b ? tensor_data(model.spk_ln_b) : nullptr;
     for (int i = 0; i < 1024; i++) { float x = (temp[i] - mean) * inv_std; if (ln_w) x *= ln_w[i]; if (ln_b) x += ln_b[i]; out[i] = x; }
+    delete[] temp;
 }
 
 void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_val,
     const float * speaker_emb, float * out) {
     int hidden = DIT_HIDDEN_SIZE, n_tokens = seq_len;
-    float cond[1024];
+    float * cond = new float[1024];
     compute_time_embedding_manual(model, t_val, cond);
-    if (speaker_emb) { float spk_vals[1024]; compute_speaker_manual(model, speaker_emb, spk_vals);
-        for (int i = 0; i < 1024; i++) cond[i] += spk_vals[i]; }
+    if (speaker_emb) { float * spk_vals = new float[1024]; compute_speaker_manual(model, speaker_emb, spk_vals);
+        for (int i = 0; i < 1024; i++) cond[i] += spk_vals[i]; delete[] spk_vals; }
     float * h = new float[n_tokens * hidden];
     float * iw = tensor_data(model.input_layer_w); float * ib = model.input_layer_b ? tensor_data(model.input_layer_b) : nullptr;
     for (int t = 0; t < n_tokens; t++) manual_linear(h + t*hidden, x + t*hidden, iw, ib, hidden, hidden);
@@ -59,7 +63,7 @@ void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_va
         for (int i = 0; i < hidden; i++) ln_out[t*hidden+i] = ln_out[t*hidden+i] * (1.0f + scale[i]) + shift[i]; }
     float * ow = tensor_data(model.out_proj_w); float * ob = model.out_proj_b ? tensor_data(model.out_proj_b) : nullptr;
     for (int t = 0; t < n_tokens; t++) manual_linear(out + t*VAE_LATENT_DIM, ln_out + t*hidden, ow, ob, hidden, VAE_LATENT_DIM);
-    delete[] h; delete[] block_out; delete[] ln_out;
+    delete[] h; delete[] block_out; delete[] ln_out; delete[] cond;
 }
 
 ggml_tensor * dit_forward(dit_model & model, ggml_context * ctx,
