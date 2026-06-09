@@ -4,7 +4,6 @@
 // dots.tts.cpp - End-to-end TTS pipeline (C++ version)
 // All fixes applied: no NaN, correct conditioning, autoregressive LLM feedback
 #include "dots_tts.h"
-#include "dit_dump.h"
 #include "dit.h"
 #include "audiovae.h"
 #include "bigvgan_cpp.h"
@@ -173,26 +172,9 @@ int main(int argc, char ** argv) {
             dx = ggml_cont(gctx, ggml_permute(gctx, dx, 2, 1, 0, 3));
             ggml_tensor * ti = ggml_new_tensor_1d(gctx, GGML_TYPE_F32, 1); ((float*)ti->data)[0] = t;
             ggml_tensor * spk = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, 512, 1); memcpy(tensor_data(spk), spk_emb, 512 * sizeof(float));
-            dit_dump_ctx dit_dump; dit_dump.enabled = dump_debug;
-            ggml_tensor * dout = dit_forward(dit, gctx, dx, ti, spk, &dit_dump);
+            ggml_tensor * dout = dit_forward(dit, gctx, dx, ti, spk);
             { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
-            if (dump_debug) dit_dump.capture();
-            if (dump_debug) dit_dump.write_all("debug");
-            float * vdata = tensor_data(dout);
-            // DUMP DiT input/output for first call, first step
-            if (call == 0 && step == 0) {
-                float * idata = tensor_data(dx);
-                FILE * df = fopen("debug/dit_input.bin", "wb");
-                if(df){fwrite(idata,sizeof(float),cond_seq*DIT_HIDDEN_SIZE,df);fclose(df);}
-                int out_n = cond_seq * VAE_LATENT_DIM;
-                df = fopen("debug/dit_output.bin", "wb");
-                if(df){fwrite(vdata,sizeof(float),out_n,df);fclose(df);}
-                float ir=0, ora=0; for(int i=0;i<cond_seq*DIT_HIDDEN_SIZE;i++)ir+=idata[i]*idata[i];
-                for(int i=0;i<out_n;i++)ora+=vdata[i]*vdata[i];
-                printf("  DiT dump: input rms=%.4f output rms=%.4f (len=%d)\\n",
-                    sqrtf(ir/(cond_seq*DIT_HIDDEN_SIZE)), sqrtf(ora/out_n), out_n);
-            }
-            bool has_nan = false;
+            float * vdata = tensor_data(dout); bool has_nan = false;
             // Extract velocity for noise positions (noise_pos .. noise_pos+patch_size-1)
             // vdata layout: [VAE_LATENT_DIM=128, cond_seq] = [ch * cond_seq + t]
             for (int p = 0; p < patch_size; p++) {
@@ -216,8 +198,6 @@ int main(int argc, char ** argv) {
                 dx_null = ggml_cont(gctx, ggml_permute(gctx, dx_null, 2, 1, 0, 3));
                 ggml_tensor * dout_null = dit_forward(dit, gctx, dx_null, ti, spk);
                 { ggml_cgraph * dgf = ggml_new_graph(gctx); ggml_build_forward_expand(dgf, dout_null); ggml_graph_compute_with_ctx(gctx, dgf, n_threads); }
-            if (dump_debug) dit_dump.capture();
-            if (dump_debug) dit_dump.write_all("debug");
                 float * vnull = tensor_data(dout_null);
                 for (int p = 0; p < patch_size; p++) {
                     int t_idx = noise_pos + p;

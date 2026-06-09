@@ -9,7 +9,6 @@
 
 #include "dots_tts.h"
 #include "ggml.h"
-#include "dit_dump.h"
 #include <vector>
 #include <string>
 
@@ -130,18 +129,12 @@ bool dit_model_load(dit_model & model, ggml_context * ctx);
 // t: timestep [1, n_batch] — scalar in [0, 1]
 // speaker_emb: speaker x-vector [speaker_dim, n_batch] or nullptr for unconditional
 // returns: velocity field [seq_len, latent_dim]
-
-// Forward declaration from dit_loader.cpp
-class SafeTensorsFile;
-struct ggml_context;
-bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m);
-
 ggml_tensor * dit_forward(
     dit_model & model,
     ggml_context * ctx,
     ggml_tensor * x,
     ggml_tensor * t,
-    ggml_tensor * speaker_emb, dit_dump_ctx * dump = nullptr);
+    ggml_tensor * speaker_emb);
 
 // timestep embedding: scalar t -> [ada_dim] sinusoidal
 ggml_tensor * dit_timestep_embedding(ggml_context * ctx, ggml_tensor * t, int dim);

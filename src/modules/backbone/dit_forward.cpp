@@ -11,8 +11,6 @@
 #include "dots_tts_util.h"
 #include "dit.h"
 #include "ggml.h"
-#include "ggml-cpu.h"
-#include "ggml.h"
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -58,26 +56,11 @@ static ggml_tensor * dit_ffn(
     ggml_context * ctx,
     ggml_tensor * x,        // [hidden, N]  (flattened batch*seq)
     ggml_tensor * w1,       // [ffn, hidden]
-    ggml_tensor * w2,       // [hidden, ffn]
-    ggml_tensor * b1,       // [ffn]
-    ggml_tensor * b2        // [hidden]
+    ggml_tensor * w2        // [hidden, ffn]
 ) {
     ggml_tensor * h = ggml_mul_mat(ctx, w1, x);
-    if (b1) {
-        int n = b1->ne[0];
-        ggml_tensor * b1_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
-        memcpy(b1_copy->data, b1->data, n * sizeof(float));
-        h = ggml_add(ctx, h, b1_copy);
-    }
     h = ggml_silu(ctx, h);
-    h = ggml_mul_mat(ctx, w2, h);
-    if (b2) {
-        int n = b2->ne[0];
-        ggml_tensor * b2_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
-        memcpy(b2_copy->data, b2->data, n * sizeof(float));
-        h = ggml_add(ctx, h, b2_copy);
-    }
-    return h;
+    return ggml_mul_mat(ctx, w2, h);
 }
 
 // ===========================================================================
@@ -308,55 +291,35 @@ static ggml_tensor * dit_attention(
     // Q: [n_heads, head_dim, n_tokens] -> [head_dim, n_heads, n_tokens] via permute
     // But mul_mat operates on last two dims...
     
-    // Multi-head attention: per-head softmax(Q_h @ K_h^T / sqrt(d)) @ V_h
-    // Q, K, V after RoPE: each [hidden, n_tokens] = [n_heads*head_dim, n_tokens]
-    // Reshape to [n_heads, head_dim, n_tokens] for per-head processing
-    q = ggml_cont(ctx, ggml_permute(ctx, q, 1, 2, 0, 3)); // [n_heads, head_dim, n_tokens]
-    k = ggml_cont(ctx, ggml_permute(ctx, k, 1, 2, 0, 3));
-    v = ggml_cont(ctx, ggml_permute(ctx, v, 1, 2, 0, 3));
-    
-    float scale = 1.0f / sqrtf((float)head_dim);
-    int n_tokens_total = seq_len * n_batch;
-    
-    // Allocate output buffer [hidden, n_tokens]
-    ggml_tensor * attn_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens_total, hidden);
-    float * out_data = (float*)attn_out->data;
-    
-    for (int h = 0; h < n_heads; h++) {
-        // Extract head h: [head_dim, n_tokens]
-        ggml_tensor * qh = ggml_view_2d(ctx, q, head_dim, n_tokens_total, q->nb[1], h * head_dim * sizeof(float));
-        ggml_tensor * kh = ggml_view_2d(ctx, k, head_dim, n_tokens_total, k->nb[1], h * head_dim * sizeof(float));
-        ggml_tensor * vh = ggml_view_2d(ctx, v, head_dim, n_tokens_total, v->nb[1], h * head_dim * sizeof(float));
-        
-        // scores = Q_h^T @ K_h: Q^T [n_tokens, head_dim] @ K [head_dim, n_tokens] -> [n_tokens, n_tokens]
-        ggml_tensor * qht = ggml_cont(ctx, ggml_permute(ctx, qh, 1, 0, 2, 3)); // [n_tokens, head_dim]
-        ggml_tensor * scores = ggml_mul_mat(ctx, qht, kh); // Q^T @ K
-        scores = ggml_scale(ctx, scores, scale);
-        scores = ggml_clamp(ctx, scores, -30.0f, 30.0f);
-        scores = ggml_soft_max(ctx, scores);
-        
-        // output_h = scores @ V_h^T? No: scores [n_tokens, n_tokens], V [head_dim, n_tokens]
-        // Want: V @ scores^T? No, standard: attn @ V where attn = [n_tokens, n_tokens], V = [n_tokens, head_dim]
-        // We have V_h [head_dim, n_tokens], transpose to [n_tokens, head_dim]
-        ggml_tensor * vht = ggml_cont(ctx, ggml_permute(ctx, vh, 1, 0, 2, 3)); // [n_tokens, head_dim]
-        // scores @ V = [n_tokens, n_tokens] @ [n_tokens, head_dim] -> [n_tokens, head_dim]
-        ggml_tensor * out_h = ggml_mul_mat(ctx, scores, vht);
-        // Transpose back: [n_tokens, head_dim] -> [head_dim, n_tokens]
-        out_h = ggml_cont(ctx, ggml_permute(ctx, out_h, 1, 0, 2, 3));
-        
-        // Compute this head
-        ggml_cgraph * cg = ggml_new_graph(ctx);
-        ggml_build_forward_expand(cg, out_h);
-        ggml_graph_compute_with_ctx(ctx, cg, 1);
-        
-        // Copy to output buffer: output[h * head_dim : (h+1) * head_dim, :]
-        float * head_data = (float*)out_h->data;
-        for (int i = 0; i < head_dim; i++)
-            memcpy(out_data + (h * head_dim + i) * n_tokens_total,
-                   head_data + i * n_tokens_total, n_tokens_total * sizeof(float));
-    }
-    
-    // Output projection: [hidden, n_tokens] @ o_weight -> [hidden, n_tokens]
+    // For MVP: single-head attention (all heads merged)
+    // mul_mat(A, B) = A^T @ B. A^T = Q^T = [n_tokens, hidden]. A^T @ K = [n_tokens, hidden] @ [hidden, n_tokens] = [n_tokens, n_tokens]
+    // So: scores = mul_mat(Q, K) where both are [hidden, n_tokens]
+    ggml_tensor * Qf = ggml_reshape_2d(ctx, q, hidden, n_tokens); // [hidden, n_tokens]
+    ggml_tensor * Kf = ggml_reshape_2d(ctx, k, hidden, n_tokens); // [hidden, n_tokens]
+    ggml_tensor * Vf = ggml_reshape_2d(ctx, v, hidden, n_tokens); // [hidden, n_tokens]
+
+    ggml_tensor * scores = ggml_mul_mat(ctx, Qf, Kf); // Q^T @ K = [n_tokens, n_tokens]
+
+    // Scale
+    scores = ggml_scale(ctx, scores, 1.0f / sqrtf((float)head_dim));
+
+    // Clamp to prevent softmax overflow (limit to ±30 before exp)
+    scores = ggml_clamp(ctx, scores, -30.0f, 30.0f);
+
+    // Softmax
+    scores = ggml_soft_max(ctx, scores);
+
+    // scores @ V: scores [n_tokens, n_tokens], V [hidden, n_tokens]
+    // Want: [n_tokens, hidden] = scores^T @ V^T? No
+    // scores [n_tokens, n_tokens], V [hidden, n_tokens] -> V^T [n_tokens, hidden]
+    // result = scores @ V^T = [n_tokens, n_tokens] @ [n_tokens, hidden] = [n_tokens, hidden]
+    // mul_mat(V^T, scores^T)? 
+    // mul_mat(scores, V^T): scores [n_tokens, n_tokens], V^T [n_tokens, hidden] -> [n_tokens, hidden]
+    ggml_tensor * Vt = ggml_cont(ctx, ggml_permute(ctx, Vf, 1, 0, 2, 3)); // [n_tokens, hidden]
+    ggml_tensor * attn_out = ggml_mul_mat(ctx, scores, Vt); // [n_tokens, hidden]
+
+    // Output projection
+    attn_out = ggml_cont(ctx, ggml_permute(ctx, attn_out, 1, 0, 2, 3)); // [hidden, n_tokens]
     attn_out = ggml_mul_mat(ctx, o_weight, attn_out);
 
     return attn_out;
@@ -455,15 +418,7 @@ static ggml_tensor * dit_block_forward_simple(
     h = ggml_mul(ctx, scale_p1, h);
     h = ggml_add(ctx, h, shift_mlp_tok);
 
-    ggml_tensor * ffn = dit_ffn(ctx, h, block.ffn_w1, block.ffn_w2, block.ffn_b1, block.ffn_b2);
-    // Dump first bias values
-    { static int done=0; if(!done && block.ffn_b1) { done=1;
-        float *d=(float*)block.ffn_b1->data; 
-        FILE* f=fopen("debug/dit_ffn_b1.bin","wb"); if(f){fwrite(d,sizeof(float),4096,f);fclose(f);}
-        d=(float*)block.ffn_b2->data;
-        f=fopen("debug/dit_ffn_b2.bin","wb"); if(f){fwrite(d,sizeof(float),1024,f);fclose(f);}
-        printf("  DiT FFN bias dumped\\n");
-    } }
+    ggml_tensor * ffn = dit_ffn(ctx, h, block.ffn_w1, block.ffn_w2);
     x = ggml_add(ctx, x, ggml_mul(ctx, gate_mlp_tok, ffn));
 
     return x;
@@ -478,11 +433,8 @@ ggml_tensor * dit_forward(
     ggml_context * ctx,
     ggml_tensor * x,           // [seq_len, n_batch, hidden]
     ggml_tensor * t,           // [n_batch] timestep
-    ggml_tensor * speaker_emb, dit_dump_ctx * dump) // [speaker_dim, n_batch] or nullptr
+    ggml_tensor * speaker_emb) // [speaker_dim, n_batch] or nullptr
 {
-    static int call_count = 0;
-    if (dump && call_count > 0) dump->enabled = false;
-    call_count++;
     int seq_len = x->ne[0];
     int n_batch = x->ne[1];
     int hidden  = DIT_HIDDEN_SIZE;
@@ -515,30 +467,10 @@ ggml_tensor * dit_forward(
     // Input layer (Linear before DiT blocks)
     if (model.input_layer_w) {
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
-        if (model.input_layer_b) {
-            ggml_tensor * b_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, DIT_HIDDEN_SIZE);
-            memcpy(b_copy->data, model.input_layer_b->data, DIT_HIDDEN_SIZE * sizeof(float));
-            x = ggml_add(ctx, x, b_copy);
-        }
-    if (dump) dump->add("dit_input_layer", x);
     }
 
-    static int dump_count = 0;
     for (int i = 0; i < model.n_layers; i++) {
         x = dit_block_forward_simple(ctx, x, cond, model.layers[i], seq_len, n_batch);
-    if (dump && i == 0) dump->add("dit_block0", x);
-        if (i == 0 && dump_count == 0) {
-            dump_count++;
-            ggml_cgraph * dgf = ggml_new_graph(ctx);
-            ggml_build_forward_expand(dgf, x);
-            ggml_graph_compute_with_ctx(ctx, dgf, 1);
-            float * xd = (float*)x->data;
-            int n = seq_len * n_batch * DIT_HIDDEN_SIZE;
-            float r=0; for(int j=0;j<n;j++) r+=xd[j]*xd[j];
-            FILE * df = fopen("debug/dit_block0.bin", "wb");
-            if(df){fwrite(xd,sizeof(float),n,df);fclose(df);}
-            printf("  DiT block0 out: rms=%.4f\\n", sqrtf(r/n));
-        }
     }
 
     // Output: adaLN modulation + linear projection
@@ -580,7 +512,6 @@ ggml_tensor * dit_forward(
         out = ggml_add(ctx, out, shift_tok);
     }
     out = ggml_mul_mat(ctx, model.out_proj_w, out);
-    if (dump) dump->add("dit_output", out);
 
     return out; // [latent_dim, n_tokens] = [VAE_LATENT_DIM, seq_len * n_batch]
 }
