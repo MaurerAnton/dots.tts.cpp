@@ -275,6 +275,8 @@ bool audiovae_encode(const AudioVAEEncoderWeights & w, const float * audio, int 
         
         // LeakyReLU after ResStack
         leaky_relu(conv_out, out_C * new_T);
+        { float rms=0; for(int i=0;i<out_C*new_T;i++) rms+=conv_out[i]*conv_out[i];
+          printf("  stage%d after RS+ReLU: rms=%.4f\n", s, sqrtf(rms/(out_C*new_T))); }
         
         delete[] cur; // free previous buffer (except first pre_out which will be freed)
         cur = conv_out;
