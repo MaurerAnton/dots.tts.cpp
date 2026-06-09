@@ -489,6 +489,7 @@ ggml_tensor * dit_forward(
     // Input layer (Linear before DiT blocks)
     if (model.input_layer_w) {
         x = ggml_mul_mat(ctx, model.input_layer_w, x);
+        if (model.input_layer_b) x = ggml_add(ctx, x, model.input_layer_b);
     if (dump) dump->add("dit_input_layer", x);
     }
 
