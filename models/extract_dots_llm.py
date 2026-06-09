@@ -1,4 +1,7 @@
 #!/usr/bin/env python3.12
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Anton Maurer
+
 """Extract dots.tts internal Mistral LLM to GGUF."""
 import sys, struct, json, os
 import numpy as np

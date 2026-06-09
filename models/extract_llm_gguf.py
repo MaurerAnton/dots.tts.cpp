@@ -1,4 +1,7 @@
 #!/usr/bin/env python3.12
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Anton Maurer
+
 """Extract Qwen2.5-1.5B LLM weights from dots.tts safetensors -> GGUF.
 Usage: python3.12 extract_llm_gguf.py [--input model.safetensors] [--output llm.gguf]
 """

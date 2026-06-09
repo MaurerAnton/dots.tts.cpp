@@ -1,4 +1,7 @@
 #!/usr/bin/env python3.12
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Anton Maurer
+
 """Convert dots.tts safetensors to GGUF format for dots.tts.cpp.
 
 Usage: python3.12 convert_dots_tts.py --out-model dots_tts_f16.gguf

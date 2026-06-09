@@ -1,4 +1,7 @@
 #!/usr/bin/env python3.12
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Anton Maurer
+
 """Decode C++ DiT latents with real dots.tts Python vocoder to verify pipeline."""
 import numpy as np, struct, sys
 

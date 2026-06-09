@@ -1,4 +1,7 @@
 #!/usr/bin/env python3.12
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Anton Maurer
+
 """dots.tts guaranteed audio generation using model.generate()"""
 import sys, os, numpy as np, torch
 sys.path.insert(0, '/tmp/dots_tts_py')
