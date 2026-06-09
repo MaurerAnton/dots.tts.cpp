@@ -56,9 +56,22 @@ inline void manual_attention(float * out, const float * x,
     int n_tokens, int hidden, int n_heads, int head_dim) {
     int n = n_tokens * hidden;
     float * q = new float[n], * k = new float[n], * v = new float[n];
-    manual_linear(q, x, qw, qb, hidden, hidden);
-    manual_linear(k, x, kw, kb, hidden, hidden);
-    manual_linear(v, x, vw, vb, hidden, hidden);
+    // QKV projections (per-token)
+    for (int t = 0; t < n_tokens; t++) {
+        manual_linear(q + t*hidden, x + t*hidden, qw, qb, hidden, hidden);
+        manual_linear(k + t*hidden, x + t*hidden, kw, kb, hidden, hidden);
+        manual_linear(v + t*hidden, x + t*hidden, vw, vb, hidden, hidden);
+    }
+
+    // DEBUG first call
+    { static int cnt=0; if(cnt==0){
+        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=q[i]*q[i];
+        fprintf(stderr,"  attn_q: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), q[0], q[1], q[2]);
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=k[i]*k[i];
+        fprintf(stderr,"  attn_k: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), k[0], k[1], k[2]);
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=v[i]*v[i];
+        fprintf(stderr,"  attn_v: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), v[0], v[1], v[2]);
+    } cnt++; }
     float * scores = new float[n_tokens * n_tokens];
     float * ao_flat = new float[n];
     for (int h = 0; h < n_heads; h++) {
@@ -78,7 +91,10 @@ inline void manual_attention(float * out, const float * x,
             for(int j=0;j<n_tokens;j++) s+=scores[i*n_tokens+j]*vh[j*head_dim+d]; ao_flat[i*hidden+h*head_dim+d]=s; }
         delete[] qh; delete[] kh; delete[] vh;
     }
-    delete[] scores; manual_linear(out, ao_flat, ow, ob, hidden, hidden);
+    delete[] scores;
+    // O projection (per-token)
+    for (int t = 0; t < n_tokens; t++)
+        manual_linear(out + t*hidden, ao_flat + t*hidden, ow, ob, hidden, hidden);
     delete[] q; delete[] k; delete[] v; delete[] ao_flat;
 }
 
