@@ -165,12 +165,12 @@ bool audiovae_encoder_load(const char * safetensors_path, AudioVAEEncoderWeights
                 // First conv (dilated): layers.d.2
                 snprintf(prefix, sizeof(prefix), "audio_encoder.generator.%d.layers.%d.2", rs_idx, d);
                 int oc1, ic1, k1;
-                load_wn_conv(sf, prefix, w.rs_w1_v[s][d], w.rs_b1[s][d], oc1, ic1, k1);
+                load_wn_conv(sf, prefix, w.rs_w1_g[s][d], w.rs_w1_v[s][d], w.rs_b1[s][d], oc1, ic1, k1);
                 
                 // Second conv (undilated): layers.d.5
                 snprintf(prefix, sizeof(prefix), "audio_encoder.generator.%d.layers.%d.5", rs_idx, d);
                 int oc2, ic2, k2;
-                load_wn_conv(sf, prefix, w.rs_w2_v[s][d], w.rs_b2[s][d], oc2, ic2, k2);
+                load_wn_conv(sf, prefix, w.rs_w2_g[s][d], w.rs_w2_v[s][d], w.rs_b2[s][d], oc2, ic2, k2);
             }
         } else {
             // Output conv (stage 6): 768→128
