@@ -190,10 +190,10 @@ int main(int argc, char ** argv) {
               if (cur_n_tok > 0) memcpy(dx_data, cond_llm_data, cur_n_tok * DIT_HIDDEN_SIZE * sizeof(float));
               if (dit.latent_proj_w && history_len > 0) { float * lw = tensor_data(dit.latent_proj_w);
                   for (int h = 0; h < history_len; h++) { float * op = dx_data + (cur_n_tok + h) * DIT_HIDDEN_SIZE, * hv = history_latents + h * latent_dim;
-                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[k * 1024 + j]; op[j] = s; } } }
+                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[j * latent_dim + k]; op[j] = s; } } }
               for (int i = 0; i < patch_size; i++) { float * op = dx_data + (noise_pos + i) * DIT_HIDDEN_SIZE;
                   if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
-                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[k * 1024 + j]; op[j] = s; } } }
+                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } }
               for (int p = 0; p < cond_seq; p++) { float * pos = dx_data + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
             // Call manual DiT forward (pure C++, byte-perfect with Python)
@@ -248,7 +248,7 @@ int main(int argc, char ** argv) {
                   for (int p = 0; p < cur_n_tok + history_len; p++) memcpy(dx_null + p * DIT_HIDDEN_SIZE, bd, DIT_HIDDEN_SIZE * sizeof(float));
                   for (int i = 0; i < patch_size; i++) { float * op = dx_null + (noise_pos + i) * DIT_HIDDEN_SIZE;
                       if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
-                          for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[k * 1024 + j]; op[j] = s; } } } }
+                          for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } } }
                 float * out_null = new float[cond_seq * VAE_LATENT_DIM];
                 // Manual DiT for null conditioning
                 {
