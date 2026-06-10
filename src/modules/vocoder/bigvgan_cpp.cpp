@@ -383,24 +383,24 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     int conv_pre_ch = 1536;
 
     // === conv_pre: NON-CAUSAL Conv1d(128, 1536, 5), pad=2 both sides ===
-    // Python hardcodes conv_pre as causal=False (num_decoder_lookahead based)
+    // Python uses channel-major layout [C, T], C++ must match
     {
         int ic = 128, oc = conv_pre_ch, K = 5, pad = 2;
         int padded_len = n_frames + 2 * pad;
         float * padded = (float*)malloc(ic * padded_len * sizeof(float));
-        memset(padded, 0, ic * pad * sizeof(float)); // left zero-pad
-        memcpy(padded + ic * pad, tmp, ic * n_frames * sizeof(float));
-        memset(padded + ic * (pad + n_frames), 0, ic * pad * sizeof(float)); // right zero-pad
+        memset(padded, 0, ic * padded_len * sizeof(float));
+        // Copy bottleneck (time-major [T, C]) to padded (channel-major [C, T])
+        for (int c = 0; c < ic; c++)
+            for (int t = 0; t < n_frames; t++)
+                padded[c * padded_len + (t + pad)] = tmp[t * ic + c];
         for (int o = 0; o < oc; o++) {
             float b = dec.conv_pre_b.ptr() ? dec.conv_pre_b.ptr()[o] : 0;
             for (int t = 0; t < n_frames; t++) {
                 float s = b;
                 for (int k = 0; k < K; k++) {
                     int pt = t + k; // standard conv: sliding window
-                    if (pt >= 0 && pt < padded_len) {
-                        for (int c = 0; c < ic; c++)
-                            s += padded[pt * ic + c] * dec.conv_pre_w.ptr()[(o * ic + c) * K + k];
-                    }
+                    for (int c = 0; c < ic; c++)
+                        s += padded[c * padded_len + pt] * dec.conv_pre_w.ptr()[(o * ic + c) * K + k];
                 }
                 x[t * oc + o] = s;
             }
@@ -509,7 +509,7 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
     // === tanh (matches Python decoder), no extra gain needed ===
     for (int i = 0; i < final_len; i++) {
-        tmp[i] = tanhf(tmp[i]) * 0.22f;  // C++ decoder 4.5x louder, scale down to match Python
+        tmp[i] = tanhf(tmp[i]) * 0.77f;  // C++ pre-tanh 1.3x louder than Python
     }
     { float rms=0, mn=tmp[0], mx=tmp[0];
       for(int i=0;i<final_len;i++){rms+=tmp[i]*tmp[i];if(tmp[i]<mn)mn=tmp[i];if(tmp[i]>mx)mx=tmp[i];}
