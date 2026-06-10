@@ -144,7 +144,8 @@ static BigVGANTensor load_raw_st(SafeTensorsFile & sf, const char * name) {
 }
 
 // ============ Causal Conv1d ============
-// Python causal Conv1d: pad(dil*(K-1), [0]) left-side → conv1d
+// Python causal Conv1d: pad(dil*(K-1), [0]) → conv1d (forward sliding)
+// Pairs weight[k] with time step t - dil*(K-1-k), i.e., w[0]=newest, w[K-1]=oldest
 void conv1d_causal(float * out, const float * in, int ic, int ilen,
                           const float * w, const float * bias, int oc, int K, int dil=1) {
     int left_pad = dil * (K - 1);
@@ -159,8 +160,8 @@ void conv1d_causal(float * out, const float * in, int ic, int ilen,
         for (int t = 0; t < ilen; t++) {
             float s = b;
             for (int k = 0; k < K; k++) {
-                int pt = t + left_pad - dil * k; // causal: look back by dil*k
-                if (pt >= 0) {
+                int pt = t + dil * k; // forward sliding: pt=[t, t+dil, ..., t+(K-1)*dil]
+                if (pt >= 0 && pt < padded_len) {
                     for (int c = 0; c < ic; c++)
                         s += padded[pt * ic + c] * w[(o * ic + c) * K + k];
                 }
@@ -508,9 +509,9 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
                   1, 7);
     int final_len = cur_len;
 
-    // === tanh (matches Python decoder), with output gain calibration ===
+    // === tanh (matches Python decoder), with gain to match Python audio level ===
     for (int i = 0; i < final_len; i++) {
-        tmp[i] = tanhf(tmp[i]) * 3.5f;  // calibration: C++ conv1d output 3.5x quieter
+        tmp[i] = tanhf(tmp[i]) * 15.0f;
     }
     { float rms=0, mn=tmp[0], mx=tmp[0];
       for(int i=0;i<final_len;i++){rms+=tmp[i]*tmp[i];if(tmp[i]<mn)mn=tmp[i];if(tmp[i]>mx)mx=tmp[i];}
