@@ -76,7 +76,6 @@ inline void manual_attention(float * out, const float * x,
         float scale=1.0f/sqrtf((float)head_dim);
         for(int i=0;i<n_tokens;i++){ for(int j=0;j<n_tokens;j++){ float s=0;
             for(int d=0;d<head_dim;d++) s+=qh[i*head_dim+d]*kh[j*head_dim+d]; scores[i*n_tokens+j]=s*scale; }
-            for(int j=i+1;j<n_tokens;j++) scores[i*n_tokens+j]=-INFINITY;
             manual_softmax(scores+i*n_tokens,n_tokens); }
         for(int i=0;i<n_tokens;i++) for(int d=0;d<head_dim;d++){ float s=0;
             for(int j=0;j<n_tokens;j++) s+=scores[i*n_tokens+j]*vh[j*head_dim+d]; ao_flat[i*hidden+h*head_dim+d]=s; }

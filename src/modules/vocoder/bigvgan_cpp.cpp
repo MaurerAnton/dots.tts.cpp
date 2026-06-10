@@ -508,24 +508,17 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
                   1, 7);
     int final_len = cur_len;
 
-    // Clamp to [-1, 1] (no tanh), then apply output gain
-    float * fb = tmp;
-    // Calibrated gain: sign flip + RMS ratio (verified vs Python on real latents, corr 0.993)
-    const float output_gain = 20.0f;  // loud enough for ASR
+    // === tanh (matches Python decoder), with output gain calibration ===
     for (int i = 0; i < final_len; i++) {
-        tmp[i] *= output_gain;
-        if (tmp[i] > 1.0f) tmp[i] = 1.0f;
-        if (tmp[i] < -1.0f) tmp[i] = -1.0f;
+        tmp[i] = tanhf(tmp[i]) * 3.5f;  // calibration: C++ conv1d output 3.5x quieter
     }
-    { float rms=0, mn=fb[0], mx=fb[0];
-      for(int i=0;i<final_len;i++){rms+=fb[i]*fb[i];if(fb[i]<mn)mn=fb[i];if(fb[i]>mx)mx=fb[i];}
-      printf("  final: rms=%.4f min=%.4f max=%.4f len=%d\n",
+    { float rms=0, mn=tmp[0], mx=tmp[0];
+      for(int i=0;i<final_len;i++){rms+=tmp[i]*tmp[i];if(tmp[i]<mn)mn=tmp[i];if(tmp[i]>mx)mx=tmp[i];}
+      printf("  post_tanh: rms=%.4f min=%.4f max=%.4f len=%d\n",
              sqrtf(rms/final_len), mn, mx, final_len); }
 
-    // Copy to output (truncate/pad to expected length)
-    int cp = final_len < *n_samples ? final_len : *n_samples;
-    memcpy(audio_out, fb, cp * sizeof(float));
-    if (cp < *n_samples) memset(audio_out + cp, 0, (*n_samples - cp) * sizeof(float));
+    // Done — output is in [-1, 1] from tanh
+    memcpy(audio_out, tmp, final_len * sizeof(float));
 
     return true;
 }

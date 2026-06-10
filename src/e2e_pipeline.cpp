@@ -229,10 +229,8 @@ int main(int argc, char ** argv) {
                 }
                 delete[] dx_null; delete[] out_null;
             }
-            { float vr=0; for(int i=0;i<patch_flat;i++) vr+=v_t[i]*v_t[i]; vr=sqrtf(vr/patch_flat); float mv=15.0f, vs=(vr>mv)?(mv/vr):1.0f;
-              for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*vs*dt;if(z_t[i]>50)z_t[i]=50;if(z_t[i]<-50)z_t[i]=-50;} }
+            { for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;} }
         }
-        float scale = 0.45f; for (int i=0;i<patch_flat;i++) z_t[i]*=scale;
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         for (int i = 0; i < latent_dim; i++) { float v = z_t[i]; if(v>5)v=5; if(v<-5)v=-5; history_latents[history_len*latent_dim+i] = v; }
         history_len++; total_frames += frames_per_call;
@@ -279,8 +277,7 @@ int main(int argc, char ** argv) {
     for(int c=0;c<VAE_LATENT_DIM;c++) ch_mean[c]/=total_frames;
     for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++){float d=all_latents[f*VAE_LATENT_DIM+c]-ch_mean[c];ch_std[c]+=d*d;}
     for(int c=0;c<VAE_LATENT_DIM;c++) ch_std[c]=sqrtf(ch_std[c]/total_frames+1e-8f);
-    for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++){float z=all_latents[f*VAE_LATENT_DIM+c];z=(z-ch_mean[c])/ch_std[c];all_latents[f*VAE_LATENT_DIM+c]=z*VAE_STD[c]+VAE_MEAN[c];}
-    { float rms=0; for(int i=0;i<total_frames*VAE_LATENT_DIM;i++) rms+=all_latents[i]*all_latents[i]; printf("  Latents RMS=%.4f\n", sqrtf(rms/(total_frames*VAE_LATENT_DIM))); }
+    { float rms=0; for(int i=0;i<total_frames*VAE_LATENT_DIM;i++) rms+=all_latents[i]*all_latents[i]; printf("  Latents RMS=%.4f\\n", sqrtf(rms/(total_frames*VAE_LATENT_DIM))); }
     if (dump_debug) { FILE * f=fopen("latents.bin","wb"); if(f){fwrite(all_latents,sizeof(float),total_frames*latent_dim,f);fclose(f);} }
 
     // AudioVAE + BigVGAN
@@ -300,7 +297,7 @@ int main(int argc, char ** argv) {
         for(int i=0;i<n_samples;i++){float s=wav[i]*32767.0f;if(s>32767)s=32767;if(s<-32768)s=-32768;short si=(short)s;fwrite(&si,2,1,wf);} fclose(wf); } }
 
     BigVGANDecoder bigvgan;
-    if (bigvgan_load((std::string(model_dir) + "/vocoder.safetensors").c_str(), bigvgan)) {
+    if (bigvgan_load("models/vocoder_eff.safetensors", bigvgan)) {
         int real_samples; float * real_wav = new float[n_frames * VAE_HOP_SAMPLES];
         bigvgan_decode(bigvgan, all_latents, n_frames, real_wav, &real_samples);
         { FILE * wf = fopen(out_path, "wb"); if (wf) {
