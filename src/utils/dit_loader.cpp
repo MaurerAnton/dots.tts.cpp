@@ -91,6 +91,9 @@ bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m)
     load("xvec_proj.1.weight", m.spk_ln_w);
     load("xvec_proj.1.bias",   m.spk_ln_b);
 
+    load("velocity_field_predictor.output_layer.adaLN_modulation.1.weight", m.out_adaln_w);
+    load("velocity_field_predictor.output_layer.adaLN_modulation.1.bias",   m.out_adaln_b);
+
     load("velocity_field_predictor.output_layer.linear.weight", m.out_proj_w);
     load("velocity_field_predictor.output_layer.linear.bias",   m.out_proj_b);
 

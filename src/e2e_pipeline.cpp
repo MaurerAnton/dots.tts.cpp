@@ -110,13 +110,18 @@ int main(int argc, char ** argv) {
         printf("  Embeddings: %d tokens\n", n_tok); free(token_embd);
     }
 
-    // === Load DiT + PatchEncoder ===
+    // === Load DiT + PatchEncoder (separate contexts to avoid corruption) ===
     printf("[2] Loading models...\n");
     SafeTensorsFile sf; sf.open((std::string(model_dir) + "/model.safetensors").c_str());
-    ggml_init_params wp = { .mem_size = 4ULL*1024*1024*1024 };
-    ggml_context * w_ctx = ggml_init(wp);
-    dit_model dit; load_dit_weights(sf, w_ctx, dit);
-    patch_encoder pe; load_patchenc_weights(sf, w_ctx, pe);
+    ggml_init_params wp_dit = { .mem_size = 3ULL*1024*1024*1024 };
+    ggml_context * w_ctx_dit = ggml_init(wp_dit);
+    dit_model dit; load_dit_weights(sf, w_ctx_dit, dit);
+    sf.close();
+    // Reload for PatchEncoder in its own context
+    sf.open((std::string(model_dir) + "/model.safetensors").c_str());
+    ggml_init_params wp_pe = { .mem_size = 3ULL*1024*1024*1024 };
+    ggml_context * w_ctx_pe = ggml_init(wp_pe);
+    patch_encoder pe; load_patchenc_weights(sf, w_ctx_pe, pe);
     sf.close();
     printf("  DiT: %d layers, PE: loaded\n", DIT_NUM_LAYERS);
 
@@ -149,6 +154,10 @@ int main(int argc, char ** argv) {
     memcpy(cond_llm_data, tensor_data(cond_llm), DIT_HIDDEN_SIZE * n_tok * sizeof(float));
     float * history_latents = new float[n_frames_total * latent_dim];
 
+    // Free gctx after copying — manual DiT doesn't need it
+    ggml_free(gctx);
+    gctx = nullptr;
+
     for (int call = 0; call < n_calls; call++) {
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { ggml_free(gctx); gctx = ggml_init(gp); }
@@ -174,6 +183,8 @@ int main(int argc, char ** argv) {
             // Call manual DiT forward
             float * out_data = new float[cond_seq * VAE_LATENT_DIM];
             dit_forward_raw(dit, dx_data, cond_seq, t, spk_emb, out_data);
+            { float r=0; for(int i=0;i<cond_seq*VAE_LATENT_DIM;i++) r+=out_data[i]*out_data[i];
+              fprintf(stderr, "  dit_raw_out rms=%.4f\n", sqrtf(r/(cond_seq*VAE_LATENT_DIM))); }
             float * vdata = out_data; bool has_nan = false;
             // Extract velocity for noise positions
             for (int p = 0; p < patch_size; p++) {
@@ -215,8 +226,10 @@ int main(int argc, char ** argv) {
         for (int i = 0; i < latent_dim; i++) { float v = z_t[i]; if(v>5)v=5; if(v<-5)v=-5; history_latents[history_len*latent_dim+i] = v; }
         history_len++; total_frames += frames_per_call;
 
-        ggml_reset(gctx);  // needed for PatchEncoder ggml graph
+        // Recreate gctx for PatchEncoder
         if (pe.in_proj_w && call < n_calls - 1) {
+            if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
+            else ggml_reset(gctx);
             ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
             memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
             ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
@@ -263,6 +276,7 @@ int main(int argc, char ** argv) {
     printf("[5] Vocoder...\n");
     int n_frames = total_frames, n_samples;
     float * wav = new float[n_frames * VAE_HOP_SAMPLES];
+    if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
     ggml_reset(gctx);
     ggml_tensor * lt = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, VAE_LATENT_DIM, n_frames);
     memcpy(tensor_data(lt), all_latents, n_frames * VAE_LATENT_DIM * sizeof(float));
@@ -288,7 +302,7 @@ int main(int argc, char ** argv) {
         delete[] real_wav; bigvgan_free(bigvgan);
     }
     delete[] wav; delete[] all_latents;
-    ggml_free(gctx); ggml_free(w_ctx);
+    ggml_free(gctx); ggml_free(w_ctx_dit); ggml_free(w_ctx_pe);
     if (lctx) llama_free(lctx);
     if (llm) llama_model_free(llm);
     if (benchmark) { double t2 = now_ms(); printf("\n=== BENCHMARK ===\n  Load: %d ms  Gen: %d ms  Total: %d ms\n", (int)t_load, (int)(t2-t_gen_start), (int)(t2-t1)); }
