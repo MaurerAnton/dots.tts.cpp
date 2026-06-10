@@ -144,6 +144,37 @@ target_include_directories(test_manual_b0 PRIVATE
 )
 target_link_libraries(test_manual_b0 PRIVATE ggml pthread m)
 
+# ---- 18-block stress test ----
+add_executable(test_18blocks test/test_18blocks.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp)
+target_include_directories(test_18blocks PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_18blocks PRIVATE ggml pthread m)
+
+# ---- Pipeline simulation test ----
+add_executable(test_pipeline_sim test/test_pipeline_sim.cpp
+    src/modules/backbone/dit_forward.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp)
+target_include_directories(test_pipeline_sim PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_pipeline_sim PRIVATE ggml pthread m)
+
+# ---- Clean comparison test ----
+add_executable(test_clean_cmp test/test_clean_cmp.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp)
+target_include_directories(test_clean_cmp PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_clean_cmp PRIVATE ggml pthread m)
+
 # ---- Test BigVGAN vs Python reference ----
 add_executable(test_bigvgan_cmp test/test_bigvgan_cmp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
 target_include_directories(test_bigvgan_cmp PRIVATE
