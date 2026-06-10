@@ -328,6 +328,9 @@ int main(int argc, char ** argv) {
     for(int c=0;c<VAE_LATENT_DIM;c++) ch_mean[c]/=total_frames;
     for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++){float d=all_latents[f*VAE_LATENT_DIM+c]-ch_mean[c];ch_std[c]+=d*d;}
     for(int c=0;c<VAE_LATENT_DIM;c++) ch_std[c]=sqrtf(ch_std[c]/total_frames+1e-8f);
+    // Denormalize to VAE distribution: z = (z - mean) / std * VAE_STD + VAE_MEAN
+    for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++)
+        all_latents[f*VAE_LATENT_DIM+c] = (all_latents[f*VAE_LATENT_DIM+c] - ch_mean[c]) / ch_std[c] * VAE_STD[c] + VAE_MEAN[c];
     { float rms=0; for(int i=0;i<total_frames*VAE_LATENT_DIM;i++) rms+=all_latents[i]*all_latents[i]; printf("  Latents RMS=%.4f\\n", sqrtf(rms/(total_frames*VAE_LATENT_DIM))); }
     if (dump_debug) { FILE * f=fopen("latents.bin","wb"); if(f){fwrite(all_latents,sizeof(float),total_frames*latent_dim,f);fclose(f);} }
 
