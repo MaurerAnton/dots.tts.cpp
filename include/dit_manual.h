@@ -119,15 +119,19 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
         fprintf(stderr,"  cpp_mod: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
         r=0; for(int i=0;i<n_tokens*hidden;i++) r+=ao[i]*ao[i];
         fprintf(stderr,"  cpp_attn_out: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=h[i]*h[i];
-        fprintf(stderr,"  cpp_after_attn: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=fh2[i]*fh2[i];
-        fprintf(stderr,"  cpp_ffn_out: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=out[i]*out[i];
-        fprintf(stderr,"  cpp_b0: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), out[0], out[1], out[2]);
-        r=0; for(int i=0;i<hidden;i++) r+=sm[i]*sm[i];
-        fprintf(stderr,"  cpp_b0_sm: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), sm[0], sm[1], sm[2]);
-        cnt++;
+    // DEBUG first call
+    { static int cnt=0; if(cnt==0){
+        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=q[i]*q[i];
+        fprintf(stderr,"  cpp_Q: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=k[i]*k[i];
+        fprintf(stderr,"  cpp_K: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=v[i]*v[i];
+        fprintf(stderr,"  cpp_V: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        // Dump
+        FILE * f = fopen("debug/cpp_q.bin","wb"); fwrite(q,sizeof(float),n_tokens*hidden,f); fclose(f);
+        f = fopen("debug/cpp_k.bin","wb"); fwrite(k,sizeof(float),n_tokens*hidden,f); fclose(f);
+        f = fopen("debug/cpp_v.bin","wb"); fwrite(v,sizeof(float),n_tokens*hidden,f); fclose(f);
+    } cnt++; }
     }}
     delete[] cs; delete[] adaln_raw; delete[] normed; delete[] mod; delete[] ao; delete[] h; delete[] fh1; delete[] fh2;
 }
