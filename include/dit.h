@@ -139,3 +139,9 @@ ggml_tensor * dit_forward(
 
 // timestep embedding: scalar t -> [ada_dim] sinusoidal
 ggml_tensor * dit_timestep_embedding(ggml_context * ctx, ggml_tensor * t, int dim);
+
+// manual C++ forward pass (pure C++, no ggml graph dependency)
+// x: [seq_len, hidden] flat, t_val: scalar in [0,1], speaker_emb: [512] or nullptr
+// out: [seq_len * VAE_LATENT_DIM] flat
+void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_val,
+    const float * speaker_emb, float * out);

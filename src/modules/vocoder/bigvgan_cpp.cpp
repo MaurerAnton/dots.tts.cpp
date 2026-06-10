@@ -511,7 +511,7 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
     // === tanh (matches Python decoder), with gain to match Python audio level ===
     for (int i = 0; i < final_len; i++) {
-        tmp[i] = tanhf(tmp[i]) * 15.0f;
+        tmp[i] = tanhf(tmp[i]) * 14.0f;  // match Python decoder output RMS 0.24 from C++ latents
     }
     { float rms=0, mn=tmp[0], mx=tmp[0];
       for(int i=0;i<final_len;i++){rms+=tmp[i]*tmp[i];if(tmp[i]<mn)mn=tmp[i];if(tmp[i]>mx)mx=tmp[i];}

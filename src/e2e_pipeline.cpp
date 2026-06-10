@@ -5,6 +5,7 @@
 // All fixes applied: no NaN, correct conditioning, autoregressive LLM feedback
 #include "dots_tts.h"
 #include "dit.h"
+#include "dit_manual.h"
 #include "audiovae.h"
 #include "bigvgan_cpp.h"
 #include "patchenc.h"
@@ -29,10 +30,24 @@ static const float VAE_STD[128] = {3.0316,2.8055,1.7751,1.7465,2.0646,1.9869,2.2
 bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m);
 bool load_patchenc_weights(SafeTensorsFile & sf, ggml_context * w_ctx, patch_encoder & enc);
 bool extract_embeddings(const char * gguf_path, const char * out_path);
-void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_val,
-    const float * speaker_emb, float * out);
-static float * tensor_data(ggml_tensor * t) { return (float *)((char *)t->data + t->view_offs); }
 static double now_ms() { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec*1000.0 + ts.tv_nsec/1000000.0; }
+
+// Local compute_cond (replaces dit_forward_raw's compute_cond)
+static void compute_cond(dit_model & m, float t_val, const float * spk_emb, float * cond) {
+    int half=128; float se[256], h1[1024];
+    for(int i=0;i<half;i++){float f=expf(-logf(10000.0f)*(float)i/(float)half);
+        se[i]=cosf(t_val*f); se[half+i]=sinf(t_val*f);}
+    {float*w1=tensor_data(m.t_embed_w1);float*b1=m.t_embed_b1?tensor_data(m.t_embed_b1):nullptr;
+     for(int o=0;o<1024;o++){float s=b1?b1[o]:0.0f;for(int i=0;i<256;i++)s+=w1[o*256+i]*se[i];h1[o]=s/(1.0f+expf(-s));}}
+    {float*w2=tensor_data(m.t_embed_w2);float*b2=m.t_embed_b2?tensor_data(m.t_embed_b2):nullptr;
+     for(int o=0;o<1024;o++){float s=b2?b2[o]:0.0f;for(int i=0;i<1024;i++)s+=w2[o*1024+i]*h1[i];cond[o]=s;}}
+    if(spk_emb){float t[1024],*sw1=tensor_data(m.spk_proj_w1),*sb1=m.spk_proj_b1?tensor_data(m.spk_proj_b1):nullptr;
+     for(int o=0;o<1024;o++){float s=sb1?sb1[o]:0.0f;for(int i=0;i<512;i++)s+=sw1[o*512+i]*spk_emb[i];t[o]=s;}
+     float mean=0;for(int i=0;i<1024;i++)mean+=t[i];mean/=1024;
+     float var=0;for(int i=0;i<1024;i++){float d=t[i]-mean;var+=d*d;}var=var/1024+1e-5f;
+     float istd=1.0f/sqrtf(var);float*lw=m.spk_ln_w?tensor_data(m.spk_ln_w):nullptr,*lb=m.spk_ln_b?tensor_data(m.spk_ln_b):nullptr;
+     for(int i=0;i<1024;i++){float x=(t[i]-mean)*istd;if(lw)x*=lw[i];if(lb)x+=lb[i];cond[i]+=x;}}
+}
 static float randn() { float u1=(float)rand()/RAND_MAX,u2=(float)rand()/RAND_MAX; if(u1<1e-6f)u1=1e-6f; return sqrtf(-2.0f*logf(u1))*cosf(2.0f*3.14159f*u2); }
 
 int main(int argc, char ** argv) {
@@ -181,14 +196,31 @@ int main(int argc, char ** argv) {
                       for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[k * 1024 + j]; op[j] = s; } } }
               for (int p = 0; p < cond_seq; p++) { float * pos = dx_data + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
-            // Call manual DiT forward
+            // Call manual DiT forward (pure C++, byte-perfect with Python)
             float * out_data = new float[cond_seq * VAE_LATENT_DIM];
             // Dump input for Python comparison
             if (step == 0 && call == 0) {
                 FILE * f = fopen("debug/cpp_dit_input.bin", "wb");
                 if (f) { fwrite(dx_data, sizeof(float), cond_seq * DIT_HIDDEN_SIZE, f); fclose(f); }
             }
-            dit_forward_raw(dit, dx_data, cond_seq, t, spk_emb, out_data);
+            float cond[1024]; compute_cond(dit, t, spk_emb, cond);
+            float * h_dit = new float[cond_seq * DIT_HIDDEN_SIZE];
+            {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
+             for(int ti=0;ti<cond_seq;ti++) manual_linear(h_dit+ti*DIT_HIDDEN_SIZE,dx_data+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}
+            float * bo_dit = new float[cond_seq * DIT_HIDDEN_SIZE];
+            for(int i=0;i<dit.n_layers;i++){manual_dit_block(h_dit,cond,dit.layers[i],bo_dit,cond_seq);float*tmp=h_dit;h_dit=bo_dit;bo_dit=tmp;}
+            // Output layer
+            float cs2[1024]; for(int i=0;i<1024;i++) cs2[i]=cond[i]/(1.0f+expf(-cond[i]));
+            float mod_raw2[2*DIT_HIDDEN_SIZE];
+            {float*aw=tensor_data(dit.out_adaln_w);float*ab=dit.out_adaln_b?tensor_data(dit.out_adaln_b):nullptr;
+             for(int o=0;o<2*DIT_HIDDEN_SIZE;o++){float s=ab?ab[o]:0.0f;for(int i=0;i<DIT_HIDDEN_SIZE;i++)s+=aw[o*DIT_HIDDEN_SIZE+i]*cs2[i];mod_raw2[o]=s;}}
+            float*dit_shift=mod_raw2,*dit_scale=mod_raw2+DIT_HIDDEN_SIZE;
+            float*dit_ln=new float[cond_seq*DIT_HIDDEN_SIZE];
+            for(int ti=0;ti<cond_seq;ti++){manual_layernorm(dit_ln+ti*DIT_HIDDEN_SIZE,h_dit+ti*DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);
+                for(int j=0;j<DIT_HIDDEN_SIZE;j++)dit_ln[ti*DIT_HIDDEN_SIZE+j]=dit_ln[ti*DIT_HIDDEN_SIZE+j]*(1.0f+dit_scale[j])+dit_shift[j];}
+            float*ow=tensor_data(dit.out_proj_w);float*ob=dit.out_proj_b?tensor_data(dit.out_proj_b):nullptr;
+            for(int ti=0;ti<cond_seq;ti++) manual_linear(out_data+ti*VAE_LATENT_DIM,dit_ln+ti*DIT_HIDDEN_SIZE,ow,ob,DIT_HIDDEN_SIZE,VAE_LATENT_DIM);
+            delete[] h_dit; delete[] bo_dit; delete[] dit_ln;
             { float r=0; for(int i=0;i<cond_seq*VAE_LATENT_DIM;i++) r+=out_data[i]*out_data[i];
               fprintf(stderr, "  dit_raw_out rms=%.4f\n", sqrtf(r/(cond_seq*VAE_LATENT_DIM)));
               // Dump first step velocity for comparison with Python
@@ -218,7 +250,26 @@ int main(int argc, char ** argv) {
                       if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
                           for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[k * 1024 + j]; op[j] = s; } } } }
                 float * out_null = new float[cond_seq * VAE_LATENT_DIM];
-                dit_forward_raw(dit, dx_null, cond_seq, t, spk_emb, out_null);
+                // Manual DiT for null conditioning
+                {
+                    float null_cond[1024]; compute_cond(dit, t, spk_emb, null_cond);
+                    float * hn = new float[cond_seq * DIT_HIDDEN_SIZE];
+                    {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
+                     for(int ti=0;ti<cond_seq;ti++) manual_linear(hn+ti*DIT_HIDDEN_SIZE,dx_null+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}
+                    float * bn = new float[cond_seq * DIT_HIDDEN_SIZE];
+                    for(int i=0;i<dit.n_layers;i++){manual_dit_block(hn,null_cond,dit.layers[i],bn,cond_seq);float*tmp=hn;hn=bn;bn=tmp;}
+                    float csn[1024]; for(int i=0;i<1024;i++) csn[i]=null_cond[i]/(1.0f+expf(-null_cond[i]));
+                    float mrn[2*DIT_HIDDEN_SIZE];
+                    {float*aw=tensor_data(dit.out_adaln_w);float*ab=dit.out_adaln_b?tensor_data(dit.out_adaln_b):nullptr;
+                     for(int o=0;o<2*DIT_HIDDEN_SIZE;o++){float s=ab?ab[o]:0.0f;for(int i=0;i<DIT_HIDDEN_SIZE;i++)s+=aw[o*DIT_HIDDEN_SIZE+i]*csn[i];mrn[o]=s;}}
+                    float*sn=mrn,*scn=mrn+DIT_HIDDEN_SIZE;
+                    float*lnn=new float[cond_seq*DIT_HIDDEN_SIZE];
+                    for(int ti=0;ti<cond_seq;ti++){manual_layernorm(lnn+ti*DIT_HIDDEN_SIZE,hn+ti*DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);
+                        for(int j=0;j<DIT_HIDDEN_SIZE;j++)lnn[ti*DIT_HIDDEN_SIZE+j]=lnn[ti*DIT_HIDDEN_SIZE+j]*(1.0f+scn[j])+sn[j];}
+                    float*own=tensor_data(dit.out_proj_w);float*obn=dit.out_proj_b?tensor_data(dit.out_proj_b):nullptr;
+                    for(int ti=0;ti<cond_seq;ti++) manual_linear(out_null+ti*VAE_LATENT_DIM,lnn+ti*DIT_HIDDEN_SIZE,own,obn,DIT_HIDDEN_SIZE,VAE_LATENT_DIM);
+                    delete[] hn; delete[] bn; delete[] lnn;
+                }
                 float * vnull = out_null;
                 for (int p = 0; p < patch_size; p++) {
                     int t_idx = noise_pos + p;
