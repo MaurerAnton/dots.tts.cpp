@@ -425,53 +425,139 @@ static std::string bpe_word(const std::string & word,
 
 // ─── Encode ───
 std::vector<int32_t> GPT2BPETokenizer::encode(const std::string & text) const {
-    // Step 1: text → bytes → unicode
-    std::string unicode;
-    for (unsigned char c : (const std::string &)text) {
-        unicode += b2u_str(c);
-    }
-
-    // Step 2: pre-tokenize (split on space = Ġ)
-    std::vector<std::string> words;
-    pretokenize(unicode, words);
-
-    // Step 3: apply BPE to each word
-    std::vector<std::string> bpe_tokens;
-    for (const auto & w : words) {
-        std::string bpe = bpe_word(w, bpe_ranks);
-        // Split bpe result by spaces to get individual tokens
-        std::string cur;
-        for (size_t i = 0; i < bpe.size();) {
-            if (bpe[i] == ' ') {
-                if (!cur.empty()) { bpe_tokens.push_back(cur); cur.clear(); }
-                i++;
-            } else {
-                unsigned char c = (unsigned char)bpe[i];
-                int clen = (c >= 0xC0) ? 2 : 1;
-                if (i + clen > bpe.size()) clen = (int)(bpe.size() - i);
-                cur.append(bpe, i, clen);
-                i += clen;
+    // Step 0: Split text into segments: regular text + special tokens
+    struct Segment { std::string text; bool is_special; int special_id; };
+    std::vector<Segment> segs;
+    size_t pos = 0;
+    std::string cur;
+    while (pos < text.size()) {
+        // Check for special token pattern <|...|>
+        if (text[pos] == '<' && pos + 3 < text.size() && text[pos+1] == '|') {
+            size_t end = text.find("|>", pos + 2);
+            if (end != std::string::npos) {
+                std::string special = text.substr(pos, end + 2 - pos);
+                auto it = vocab.find(special);
+                if (it != vocab.end()) {
+                    if (!cur.empty()) { segs.push_back({cur, false, 0}); cur.clear(); }
+                    segs.push_back({"", true, it->second});
+                    pos = end + 2;
+                    continue;
+                }
             }
         }
-        if (!cur.empty()) bpe_tokens.push_back(cur);
+        cur += text[pos];
+        pos++;
     }
-
-    // Step 4: map to vocab IDs
+    if (!cur.empty()) segs.push_back({cur, false, 0});
+    
+    // Process each segment
     std::vector<int32_t> ids;
-    for (const auto & tok : bpe_tokens) {
-        auto it = vocab.find(tok);
-        if (it != vocab.end()) {
-            ids.push_back(it->second);
+    for (const auto & seg : segs) {
+        if (seg.is_special) {
+            ids.push_back(seg.special_id);
+        } else {
+            // Step 1: text → bytes → unicode
+            std::string unicode;
+            for (unsigned char c : (const std::string &)seg.text) {
+                unicode += b2u_str(c);
+            }
+
+            // Step 2: pre-tokenize (split on space = Ġ)
+            std::vector<std::string> words;
+            pretokenize(unicode, words);
+
+            // Step 3: apply BPE to each word
+            std::vector<std::string> bpe_tokens;
+            for (const auto & w : words) {
+                std::string bpe = bpe_word(w, bpe_ranks);
+                std::string tok;
+                for (size_t i = 0; i < bpe.size();) {
+                    if (bpe[i] == ' ') {
+                        if (!tok.empty()) { bpe_tokens.push_back(tok); tok.clear(); }
+                        i++;
+                    } else {
+                        unsigned char c = (unsigned char)bpe[i];
+                        int clen = (c >= 0xC0) ? 2 : 1;
+                        if (i + clen > bpe.size()) clen = (int)(bpe.size() - i);
+                        tok.append(bpe, i, clen);
+                        i += clen;
+                    }
+                }
+                if (!tok.empty()) bpe_tokens.push_back(tok);
+            }
+
+            // Step 4: map to vocab IDs
+            for (const auto & tok : bpe_tokens) {
+                auto it = vocab.find(tok);
+                if (it != vocab.end()) ids.push_back(it->second);
+            }
         }
     }
     return ids;
 }
 
 // ─── Load ───
+static bool load_added_tokens(const char * path, std::unordered_map<std::string, int32_t> & vocab) {
+    // Parse tokenizer_config.json for added_tokens_decoder
+    // Simple JSON parser: find '"content": "TOKEN",' followed by '"id": N'
+    FILE * f = fopen(path, "rb");
+    if (!f) return false;  // optional file
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char * buf = new char[sz + 1];
+    fread(buf, 1, sz, f);
+    buf[sz] = 0;
+    fclose(f);
+    
+    std::string content(buf);
+    delete[] buf;
+    
+    // Find each added token: pattern '"ID": {..."content": "..."...}'
+    size_t pos = 0;
+    while ((pos = content.find("\"content\": \"", pos)) != std::string::npos) {
+        size_t content_start = pos + 13;  // skip '"content": "'
+        size_t content_end = content.find('"', content_start);
+        if (content_end == std::string::npos) break;
+        std::string token = content.substr(content_start, content_end - content_start);
+        
+        // Find the ID: search backward for the object key (a number string)
+        // The JSON structure is: "ID": { ... "content": "TOKEN" ... }
+        // Search backward from pos for a number followed by '": {'
+        size_t search = pos;
+        while (search > 0) {
+            search = content.rfind('"', search - 1);
+            if (search == std::string::npos) break;
+            // Check if the characters between quotes are all digits
+            size_t key_start = search + 1;
+            size_t key_end = content.find('"', key_start);
+            if (key_end == std::string::npos) break;
+            std::string key = content.substr(key_start, key_end - key_start);
+            bool all_digits = !key.empty();
+            for (char c : key) { if (c < '0' || c > '9') { all_digits = false; break; } }
+            if (all_digits) {
+                int id = atoi(key.c_str());
+                vocab[token] = id;
+                break;
+            }
+        }
+        
+        pos = content_end + 1;
+    }
+    return true;
+}
+
 bool GPT2BPETokenizer::load(const char * model_dir) {
     std::string dir(model_dir);
     if (dir.back() != '/') dir += '/';
     if (!load_vocab((dir + "vocab.json").c_str(), vocab)) return false;
     if (!load_merges((dir + "merges.txt").c_str(), bpe_ranks)) return false;
+    load_added_tokens((dir + "tokenizer_config.json").c_str(), vocab);  // optional
+    
+    // Ensure critical special tokens are present (added_tokens decoder)
+    if (vocab.find("<|audio_gen_start|>") == vocab.end()) vocab["<|audio_gen_start|>"] = 151668;
+    if (vocab.find("<|audio_gen_end|>") == vocab.end()) vocab["<|audio_gen_end|>"] = 151670;
+    if (vocab.find("<|text_cond_end|>") == vocab.end()) vocab["<|text_cond_end|>"] = 151671;
+    
     return true;
 }
