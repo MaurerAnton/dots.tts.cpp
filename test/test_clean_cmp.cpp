@@ -1,4 +1,4 @@
-// Isolate manual_attention: dump Q/K/V and compare with Python
+// Dump attention scores for head 0
 #include "dots_tts.h"
 #include "dots_tts_util.h"
 #include "dit.h"
@@ -11,6 +11,50 @@
 
 bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m);
 
+// Modified manual_attention that dumps scores for head 0
+static void manual_attention_dump(float * out, const float * x,
+    const float * qw, const float * kw, const float * vw, const float * ow,
+    const float * qb, const float * kb, const float * vb, const float * ob,
+    const float * qnw, const float * knw,
+    int n_tokens, int hidden, int n_heads, int head_dim) {
+    int n = n_tokens * hidden;
+    float * q = new float[n], * k = new float[n], * v = new float[n];
+    for (int t = 0; t < n_tokens; t++) {
+        manual_linear(q + t*hidden, x + t*hidden, qw, qb, hidden, hidden);
+        manual_linear(k + t*hidden, x + t*hidden, kw, kb, hidden, hidden);
+        manual_linear(v + t*hidden, x + t*hidden, vw, vb, hidden, hidden);
+    }
+    float * scores = new float[n_tokens * n_tokens];
+    float * ao_flat = new float[n];
+    for (int h = 0; h < n_heads; h++) {
+        float * qh = new float[n_tokens*head_dim], * kh = new float[n_tokens*head_dim], * vh = new float[n_tokens*head_dim];
+        for (int t=0;t<n_tokens;t++) for (int d=0;d<head_dim;d++) {
+            qh[t*head_dim+d]=q[t*hidden+h*head_dim+d]; kh[t*head_dim+d]=k[t*hidden+h*head_dim+d];
+            vh[t*head_dim+d]=v[t*hidden+h*head_dim+d]; }
+        for (int t=0;t<n_tokens;t++) { manual_rms_norm(qh+t*head_dim, qh+t*head_dim, qnw, head_dim);
+            manual_rms_norm(kh+t*head_dim, kh+t*head_dim, knw, head_dim); }
+        manual_rope(qh, kh, n_tokens, head_dim);
+        float scale=1.0f/sqrtf((float)head_dim);
+        for(int i=0;i<n_tokens;i++){ for(int j=0;j<n_tokens;j++){ float s=0;
+            for(int d=0;d<head_dim;d++) s+=qh[i*head_dim+d]*kh[j*head_dim+d]; scores[i*n_tokens+j]=s*scale; }
+            for(int j=i+1;j<n_tokens;j++) scores[i*n_tokens+j]=-INFINITY;
+            manual_softmax(scores+i*n_tokens,n_tokens); }
+        if(h==0){ // Dump scores for head 0
+            FILE * f=fopen("debug/cpp_scores_h0.bin","wb");
+            fwrite(scores,sizeof(float),n_tokens*n_tokens,f); fclose(f);
+            fprintf(stderr,"Head 0 scores row 3: ");
+            for(int j=0;j<8;j++) fprintf(stderr,"%.4f ", scores[3*8+j]);
+            fprintf(stderr,"\n");
+        }
+        for(int i=0;i<n_tokens;i++) for(int d=0;d<head_dim;d++){ float s=0;
+            for(int j=0;j<n_tokens;j++) s+=scores[i*n_tokens+j]*vh[j*head_dim+d]; ao_flat[i*hidden+h*head_dim+d]=s; }
+        delete[] qh; delete[] kh; delete[] vh;
+    }
+    delete[] scores;
+    for (int t = 0; t < n_tokens; t++) manual_linear(out + t*hidden, ao_flat + t*hidden, ow, ob, hidden, hidden);
+    delete[] q; delete[] k; delete[] v; delete[] ao_flat;
+}
+
 int main() {
     const char * model_path = getenv("DOTS_TTS_MODEL");
     if (!model_path) model_path = "models/model.safetensors";
@@ -19,45 +63,18 @@ int main() {
     ggml_context * w_ctx = ggml_init(wp);
     dit_model m; load_dit_weights(sf, w_ctx, m); sf.close();
 
-    // Load Python modulated input
     float mod_in[8192];
     { FILE * f = fopen("debug/py_modulated.bin","rb"); fread(mod_in,sizeof(float),8192,f); fclose(f); }
 
-    // Load Python Q/K/V for comparison
-    float py_q[8192], py_k[8192], py_v[8192];
-    { FILE * f = fopen("debug/py_q.bin","rb"); fread(py_q,sizeof(float),8192,f); fclose(f); }
-    { FILE * f = fopen("debug/py_k.bin","rb"); fread(py_k,sizeof(float),8192,f); fclose(f); }
-    { FILE * f = fopen("debug/py_v.bin","rb"); fread(py_v,sizeof(float),8192,f); fclose(f); }
-
-    // Run C++ manual_attention
     float cpp_out[8192];
-    manual_attention(cpp_out, mod_in,
+    manual_attention_dump(cpp_out, mod_in,
         tensor_data(m.layers[0].attn_q_weight), tensor_data(m.layers[0].attn_k_weight),
         tensor_data(m.layers[0].attn_v_weight), tensor_data(m.layers[0].attn_o_weight),
-        nullptr, nullptr, nullptr, 
+        nullptr, nullptr, nullptr,
         m.layers[0].attn_o_bias ? tensor_data(m.layers[0].attn_o_bias) : nullptr,
         m.layers[0].q_norm_w ? tensor_data(m.layers[0].q_norm_w) : nullptr,
         m.layers[0].k_norm_w ? tensor_data(m.layers[0].k_norm_w) : nullptr,
         8, 1024, 16, 64);
-
-    // Actually we can't get Q/K/V from manual_attention easily. Let's just compare final output.
-    // Load Python attn output
-    float py_attn[8192];
-    { FILE * f = fopen("debug/py_attn_out.bin","rb"); fread(py_attn,sizeof(float),8192,f); fclose(f); }
-
-    float r_py=0, r_cpp=0, max_d=0; int max_i=0;
-    for(int i=0;i<8192;i++){
-        r_py+=py_attn[i]*py_attn[i]; r_cpp+=cpp_out[i]*cpp_out[i];
-        float d=fabsf(py_attn[i]-cpp_out[i]); if(d>max_d){max_d=d; max_i=i;}
-    }
-    printf("Attention output: Py RMS=%.4f C++ RMS=%.4f max_diff=%.6f at idx %d\n",
-        sqrtf(r_py/8192), sqrtf(r_cpp/8192), max_d, max_i);
-    printf("  Py[%d]=%.4f C++[%d]=%.4f\n", max_i, py_attn[max_i], max_i, cpp_out[max_i]);
-    printf("%s\n", max_d < 0.01 ? "MATCH!" : "DIFFERS");
-
-    // Dump C++ output
-    FILE * f = fopen("debug/cpp_attn_out.bin","wb");
-    fwrite(cpp_out, sizeof(float), 8192, f); fclose(f);
 
     ggml_free(w_ctx);
     return 0;

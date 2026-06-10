@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Anton Maurer
 // Manual DiT operations: LayerNorm, RMSNorm, Linear, RoPE, Softmax, Attention, Block
-// Pure C++ — no ggml dependency. Byte-perfect vs Python reference.
 #pragma once
 #include "dots_tts.h"
 #include "dots_tts_util.h"
@@ -88,11 +87,7 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
     float * sml=adaln_raw+3*hidden, * scl=adaln_raw+4*hidden, * gml=adaln_raw+5*hidden;
     float * normed = new float[n_tokens*hidden], * mod = new float[n_tokens*hidden], * ao = new float[n_tokens*hidden];
     for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, x_in+t*hidden, hidden);
-        if(t==0){ static int dc=0; if(dc==0){ float r=0; for(int i=0;i<hidden;i++) r+=normed[i]*normed[i];
-            fprintf(stderr,"  cpp_attn_normed: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), normed[0], normed[1], normed[2]); dc++; }}
-        for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scm[i])+sm[i];
-        if(t==0){ static int dc2=0; if(dc2==0){ float r=0; for(int i=0;i<hidden;i++) r+=mod[i]*mod[i];
-            fprintf(stderr,"  cpp_attn_mod: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), mod[0], mod[1], mod[2]); dc2++; }} }
+        for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scm[i])+sm[i]; }
     manual_attention(ao, mod, tensor_data(block.attn_q_weight), tensor_data(block.attn_k_weight),
         tensor_data(block.attn_v_weight), tensor_data(block.attn_o_weight),
         nullptr,nullptr,nullptr, block.attn_o_bias?tensor_data(block.attn_o_bias):nullptr,
@@ -110,28 +105,5 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
             fh1[t*DIT_FFN_SIZE+i]=0.5f*xv*(1.0f+tanhf(0.7978845608f*(xv+0.044715f*x2*xv))); }
         manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden); }
     for(int i=0;i<n_tokens*hidden;i++) out[i]=h[i]+gml[i%hidden]*fh2[i];
-    { static int cnt=0; if(cnt==0){
-        float r=0;
-        for(int i=0;i<n_tokens*hidden;i++) r+=normed[i]*normed[i];
-        fprintf(stderr,"  cpp_normed: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
-            sqrtf(r/(n_tokens*hidden)), normed[0], normed[1], normed[2]);
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=mod[i]*mod[i];
-        fprintf(stderr,"  cpp_mod: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=ao[i]*ao[i];
-        fprintf(stderr,"  cpp_attn_out: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-    // DEBUG first call
-    { static int cnt=0; if(cnt==0){
-        float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=q[i]*q[i];
-        fprintf(stderr,"  cpp_Q: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=k[i]*k[i];
-        fprintf(stderr,"  cpp_K: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=v[i]*v[i];
-        fprintf(stderr,"  cpp_V: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
-        // Dump
-        FILE * f = fopen("debug/cpp_q.bin","wb"); fwrite(q,sizeof(float),n_tokens*hidden,f); fclose(f);
-        f = fopen("debug/cpp_k.bin","wb"); fwrite(k,sizeof(float),n_tokens*hidden,f); fclose(f);
-        f = fopen("debug/cpp_v.bin","wb"); fwrite(v,sizeof(float),n_tokens*hidden,f); fclose(f);
-    } cnt++; }
-    }}
     delete[] cs; delete[] adaln_raw; delete[] normed; delete[] mod; delete[] ao; delete[] h; delete[] fh1; delete[] fh2;
 }
