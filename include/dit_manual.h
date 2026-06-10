@@ -88,7 +88,11 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
     float * sml=adaln_raw+3*hidden, * scl=adaln_raw+4*hidden, * gml=adaln_raw+5*hidden;
     float * normed = new float[n_tokens*hidden], * mod = new float[n_tokens*hidden], * ao = new float[n_tokens*hidden];
     for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, x_in+t*hidden, hidden);
-        for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scm[i])+sm[i]; }
+        if(t==0){ static int dc=0; if(dc==0){ float r=0; for(int i=0;i<hidden;i++) r+=normed[i]*normed[i];
+            fprintf(stderr,"  cpp_attn_normed: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), normed[0], normed[1], normed[2]); dc++; }}
+        for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scm[i])+sm[i];
+        if(t==0){ static int dc2=0; if(dc2==0){ float r=0; for(int i=0;i<hidden;i++) r+=mod[i]*mod[i];
+            fprintf(stderr,"  cpp_attn_mod: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), mod[0], mod[1], mod[2]); dc2++; }} }
     manual_attention(ao, mod, tensor_data(block.attn_q_weight), tensor_data(block.attn_k_weight),
         tensor_data(block.attn_v_weight), tensor_data(block.attn_o_weight),
         nullptr,nullptr,nullptr, block.attn_o_bias?tensor_data(block.attn_o_bias):nullptr,
@@ -106,5 +110,24 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
             fh1[t*DIT_FFN_SIZE+i]=0.5f*xv*(1.0f+tanhf(0.7978845608f*(xv+0.044715f*x2*xv))); }
         manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden); }
     for(int i=0;i<n_tokens*hidden;i++) out[i]=h[i]+gml[i%hidden]*fh2[i];
+    { static int cnt=0; if(cnt==0){
+        float r=0;
+        for(int i=0;i<n_tokens*hidden;i++) r+=normed[i]*normed[i];
+        fprintf(stderr,"  cpp_normed: rms=%.4f first3=[%.4f,%.4f,%.4f]\n",
+            sqrtf(r/(n_tokens*hidden)), normed[0], normed[1], normed[2]);
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=mod[i]*mod[i];
+        fprintf(stderr,"  cpp_mod: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=ao[i]*ao[i];
+        fprintf(stderr,"  cpp_attn_out: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=h[i]*h[i];
+        fprintf(stderr,"  cpp_after_attn: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=fh2[i]*fh2[i];
+        fprintf(stderr,"  cpp_ffn_out: rms=%.4f\n", sqrtf(r/(n_tokens*hidden)));
+        r=0; for(int i=0;i<n_tokens*hidden;i++) r+=out[i]*out[i];
+        fprintf(stderr,"  cpp_b0: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), out[0], out[1], out[2]);
+        r=0; for(int i=0;i<hidden;i++) r+=sm[i]*sm[i];
+        fprintf(stderr,"  cpp_b0_sm: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/hidden), sm[0], sm[1], sm[2]);
+        cnt++;
+    }}
     delete[] cs; delete[] adaln_raw; delete[] normed; delete[] mod; delete[] ao; delete[] h; delete[] fh1; delete[] fh2;
 }

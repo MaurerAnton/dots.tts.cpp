@@ -43,11 +43,19 @@ void dit_forward_raw(dit_model & model, const float * x, int seq_len, float t_va
     int hidden = DIT_HIDDEN_SIZE, n_tokens = seq_len;
     float * cond = new float[1024];
     compute_time_embedding_manual(model, t_val, cond);
+    { static int tec=0; if(tec==0){ float r=0; for(int i=0;i<1024;i++) r+=cond[i]*cond[i];
+        fprintf(stderr,"  cpp_t_emb: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/1024), cond[0], cond[1], cond[2]); tec++; }}
     if (speaker_emb) { float * spk_vals = new float[1024]; compute_speaker_manual(model, speaker_emb, spk_vals);
+        { static int sc=0; if(sc==0){ float r=0; for(int i=0;i<1024;i++) r+=spk_vals[i]*spk_vals[i];
+            fprintf(stderr,"  cpp_spk: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/1024), spk_vals[0], spk_vals[1], spk_vals[2]); sc++; }}
         for (int i = 0; i < 1024; i++) cond[i] += spk_vals[i]; delete[] spk_vals; }
+    { static int cdc=0; if(cdc==0){ float r=0; for(int i=0;i<1024;i++) r+=cond[i]*cond[i];
+        fprintf(stderr,"  cpp_cond: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/1024), cond[0], cond[1], cond[2]); cdc++; }}
     float * h = new float[n_tokens * hidden];
     float * iw = tensor_data(model.input_layer_w); float * ib = model.input_layer_b ? tensor_data(model.input_layer_b) : nullptr;
     for (int t = 0; t < n_tokens; t++) manual_linear(h + t*hidden, x + t*hidden, iw, ib, hidden, hidden);
+    { static int ilc=0; if(ilc==0){ float r=0; for(int i=0;i<n_tokens*hidden;i++) r+=h[i]*h[i];
+        fprintf(stderr,"  cpp_il_out: rms=%.4f first3=[%.4f,%.4f,%.4f]\n", sqrtf(r/(n_tokens*hidden)), h[0], h[1], h[2]); ilc++; }}
     float * block_out = new float[n_tokens * hidden];
     for (int i = 0; i < model.n_layers; i++) {
         manual_dit_block(h, cond, model.layers[i], block_out, n_tokens);
