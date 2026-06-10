@@ -85,7 +85,9 @@ int main(int argc, char ** argv) {
     printf("[1] Tokenizing...\n");
     GPT2BPETokenizer bpe_tok;
     if (!bpe_tok.load(model_dir)) { fprintf(stderr, "FAILED: tokenizer\n"); return 1; }
-    auto token_ids_vec = bpe_tok.encode(text);
+    // Wrap text in Python template
+    std::string template_text = "[文本]" + std::string(text) + "[文本对应语音]<|audio_gen_start|>";
+    auto token_ids_vec = bpe_tok.encode(template_text.c_str());
     int n_tok = (int)token_ids_vec.size();
     if (n_tok == 0) { fprintf(stderr, "Empty tokenization\n"); return 1; }
     int32_t * token_ids = token_ids_vec.data();
