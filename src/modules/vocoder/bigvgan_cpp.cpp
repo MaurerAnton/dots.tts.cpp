@@ -115,9 +115,7 @@ void aa_snakebeta(float * x, int cur_len, int ch,
             }
             float v = buf_up[i * ch + c];
             if (std::isnan(v) || std::isinf(v)) { buf_up[i * ch + c] = 0; continue; }
-            // Clamp argument to sin to avoid extreme values
             float arg = a * v;
-            if (arg > 100.0f) arg = 100.0f; if (arg < -100.0f) arg = -100.0f;
             float s = sinf(arg);
             float result = v + (1.0f / (b + 1e-9f)) * s * s;
             if (std::isnan(result) || std::isinf(result)) result = v;
