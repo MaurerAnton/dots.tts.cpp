@@ -28,10 +28,11 @@ for gk in sorted(weight_g_keys):
     w_g = sd[gk].cpu().numpy()
     w_v = sd[vk].cpu().numpy()
     
-    # norm along all dims except dim 0
-    axes = tuple(range(1, w_v.ndim))
-    norm_v = np.sqrt(np.sum(w_v**2, axis=axes, keepdims=True))
-    w_g_r = w_g.reshape(norm_v.shape)
+    # PyTorch weight_norm normalizes along dim 0
+    norm_v = np.sqrt(np.sum(w_v**2, axis=0, keepdims=True))  # shape [1, in_ch, kernel, ...]
+    # Reshape g to broadcast: [out_ch] → [out_ch, 1, 1, ...]
+    gshape = [-1] + [1] * (w_v.ndim - 1)
+    w_g_r = w_g.reshape(gshape)
     eff_w = w_v * (w_g_r / (norm_v + 1e-12))
     
     eff_state[base + '.weight'] = torch.from_numpy(eff_w.astype(np.float32))
