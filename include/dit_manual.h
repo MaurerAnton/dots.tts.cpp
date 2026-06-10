@@ -29,10 +29,21 @@ inline void manual_linear(float * out, const float * x, const float * w, const f
 }
 
 inline void manual_rope(float * q, float * k, int seq_len, int head_dim) {
-    for (int s = 0; s < seq_len; s++) { float theta = 1.0f; float ts = powf(10000.0f, -2.0f/(float)head_dim);
-        for (int d = 0; d < head_dim; d += 2) { float cs = cosf((float)s*theta), sn = sinf((float)s*theta);
-            int idx = s*head_dim+d; float q0=q[idx], q1=q[idx+1], k0=k[idx], k1=k[idx+1];
-            q[idx]=q0*cs-q1*sn; q[idx+1]=q1*cs+q0*sn; k[idx]=k0*cs-k1*sn; k[idx+1]=k1*cs+k0*sn; theta*=ts; } }
+    int half = head_dim / 2;
+    for (int s = 0; s < seq_len; s++) {
+        float theta = 1.0f;
+        float ts = powf(10000.0f, -2.0f/(float)head_dim);
+        for (int d = 0; d < half; d++) {
+            float cs = cosf((float)s*theta), sn = sinf((float)s*theta);
+            // Python: pairs (d, d+half), not (d, d+1)!
+            int i1 = s*head_dim + d;
+            int i2 = s*head_dim + d + half;
+            float q0=q[i1], q1=q[i2], k0=k[i1], k1=k[i2];
+            q[i1]=q0*cs-q1*sn; q[i2]=q1*cs+q0*sn;
+            k[i1]=k0*cs-k1*sn; k[i2]=k1*cs+k0*sn;
+            theta *= ts;
+        }
+    }
 }
 
 inline void manual_softmax(float * x, int n) {
