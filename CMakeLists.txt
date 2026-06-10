@@ -33,7 +33,7 @@ add_executable(e2e_pipeline
     src/modules/vocoder/audiovae.cpp
     src/modules/vocoder/bigvgan_cpp.cpp
     src/modules/vocoder/lstm.cpp
-    src/utils/safetensors.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
     src/utils/dit_loader.cpp
     src/utils/patchenc_loader.cpp
     src/modules/speaker/campp.cpp
@@ -59,7 +59,7 @@ add_executable(test_vocoder
     test/test_vocoder.cpp
     src/modules/vocoder/bigvgan_cpp.cpp
     src/modules/vocoder/lstm.cpp
-    src/utils/safetensors.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
 )
 target_include_directories(test_vocoder PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -90,7 +90,7 @@ target_include_directories(test_tokenizer PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_tokenizer PRIVATE pthread)
 
 # ---- Test CAM++ speaker encoder ----
-add_executable(test_campp test/test_campp.cpp src/modules/speaker/campp.cpp src/utils/safetensors.cpp)
+add_executable(test_campp test/test_campp.cpp src/modules/speaker/campp.cpp src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp)
 target_include_directories(test_campp PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
@@ -99,7 +99,7 @@ target_include_directories(test_campp PRIVATE
 target_link_libraries(test_campp PRIVATE ggml pthread m)
 
 # ---- Test AudioVAE encoder ----
-add_executable(test_encoder test/test_encoder.cpp src/modules/vocoder/audiovae_encoder.cpp src/utils/safetensors.cpp)
+add_executable(test_encoder test/test_encoder.cpp src/modules/vocoder/audiovae_encoder.cpp src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp)
 target_include_directories(test_encoder PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
@@ -111,7 +111,7 @@ target_link_libraries(test_encoder PRIVATE ggml pthread m)
 add_executable(test_time_embed test/test_time_embed.cpp
     src/modules/backbone/dit_forward.cpp
     src/modules/backbone/dit_attention.cpp
-    src/utils/safetensors.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
     src/utils/dit_loader.cpp)
 target_include_directories(test_time_embed PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -124,7 +124,7 @@ target_link_libraries(test_time_embed PRIVATE ggml pthread m)
 add_executable(test_dit_calib test/test_dit_calibrate.cpp
     src/modules/backbone/dit_forward.cpp
     src/modules/backbone/dit_attention.cpp
-    src/utils/safetensors.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
     src/utils/dit_loader.cpp)
 target_include_directories(test_dit_calib PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -135,7 +135,7 @@ target_link_libraries(test_dit_calib PRIVATE ggml pthread m)
 
 # ---- Manual block 0 test ----
 add_executable(test_manual_b0 test/test_manual_b0.cpp
-    src/utils/safetensors.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
     src/utils/dit_loader.cpp)
 target_include_directories(test_manual_b0 PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -146,7 +146,7 @@ target_link_libraries(test_manual_b0 PRIVATE ggml pthread m)
 
 # ---- 18-block stress test ----
 add_executable(test_18blocks test/test_18blocks.cpp
-    src/utils/safetensors.cpp src/utils/dit_loader.cpp)
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp src/utils/dit_loader.cpp)
 target_include_directories(test_18blocks PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
@@ -154,10 +154,21 @@ target_include_directories(test_18blocks PRIVATE
 )
 target_link_libraries(test_18blocks PRIVATE ggml pthread m)
 
-# ---- Pipeline simulation test ----
+# DiT time value test
+add_executable(test_dit_tvals test/test_dit_tvals.cpp
+    src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/dit_attention.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp src/utils/dit_loader.cpp)
+target_include_directories(test_dit_tvals PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_dit_tvals PRIVATE ggml pthread m)
+
+# Pipeline simulation test
 add_executable(test_pipeline_sim test/test_pipeline_sim.cpp
     src/modules/backbone/dit_forward.cpp
-    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp)
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp)
 target_include_directories(test_pipeline_sim PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
@@ -167,7 +178,7 @@ target_link_libraries(test_pipeline_sim PRIVATE ggml pthread m)
 
 # ---- Clean comparison test ----
 add_executable(test_clean_cmp test/test_clean_cmp.cpp
-    src/utils/safetensors.cpp src/utils/dit_loader.cpp)
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp src/utils/dit_loader.cpp)
 target_include_directories(test_clean_cmp PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
@@ -176,7 +187,7 @@ target_include_directories(test_clean_cmp PRIVATE
 target_link_libraries(test_clean_cmp PRIVATE ggml pthread m)
 
 # ---- Test BigVGAN vs Python reference ----
-add_executable(test_bigvgan_cmp test/test_bigvgan_cmp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+add_executable(test_bigvgan_cmp test/test_bigvgan_cmp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp)
 target_include_directories(test_bigvgan_cmp PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
@@ -191,3 +202,19 @@ target_include_directories(test_leaf_mul PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
 target_link_libraries(test_leaf_mul PRIVATE ggml pthread m)
+add_executable(test_cond_cmp test/test_cond_cmp.cpp src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp src/utils/dit_loader.cpp)
+target_include_directories(test_cond_cmp PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_cond_cmp PRIVATE ggml pthread m)
+add_executable(test_pp test/test_pp.cpp src/modules/vocoder/bigvgan_cpp.cpp src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp)
+target_include_directories(test_pp PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_pp PRIVATE ggml pthread m)
+
+add_executable(test_bn test/test_bn.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_bn PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_bn PRIVATE ggml pthread m)
+add_executable(test_cp2 test/test_cp2.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_cp2 PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_cp2 PRIVATE ggml pthread m)
+add_executable(test_bv_full test/test_bv_full.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_bv_full PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_bv_full PRIVATE ggml pthread m)

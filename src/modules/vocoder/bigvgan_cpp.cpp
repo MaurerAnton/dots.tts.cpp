@@ -509,7 +509,7 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
     // === tanh (matches Python decoder), no extra gain needed ===
     for (int i = 0; i < final_len; i++) {
-        tmp[i] = tanhf(tmp[i]) * 0.77f;  // C++ pre-tanh 1.3x louder than Python
+        tmp[i] = tanhf(tmp[i]);  // all stages byte-perfect, no gain needed
     }
     { float rms=0, mn=tmp[0], mx=tmp[0];
       for(int i=0;i<final_len;i++){rms+=tmp[i]*tmp[i];if(tmp[i]<mn)mn=tmp[i];if(tmp[i]>mx)mx=tmp[i];}
