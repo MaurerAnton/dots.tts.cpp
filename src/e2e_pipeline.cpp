@@ -278,7 +278,7 @@ int main(int argc, char ** argv) {
                 for (int p = 0; p < patch_size; p++) {
                     int t_idx = noise_pos + p;
                     for (int c = 0; c < VAE_LATENT_DIM; c++) {
-                        float vn = vnull[c * cond_seq + t_idx];
+                        float vn = vnull[t_idx * VAE_LATENT_DIM + c];
                         v_t[p * VAE_LATENT_DIM + c] = vn + cfg_scale * (v_t[p * VAE_LATENT_DIM + c] - vn);
                     }
                 }
