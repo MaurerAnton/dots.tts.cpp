@@ -149,18 +149,19 @@ int main(int argc, char ** argv) {
     // { FILE * f = fopen("speaker_emb.bin", "rb"); if (f) { fread(spk_emb, sizeof(float), 512, f); fclose(f); } else speaker_embedding_from_name(speaker_name, spk_emb); }
     printf("  Speaker: zeros (matching calibration)\n");
 
-    // === Conditioning ===
+    // === Conditioning: only last token's hidden state (hidden_patch_size=1) ===
     printf("[3] Conditioning...\n");
     ggml_init_params gp = { .mem_size = 1ULL*1024*1024*1024 };
     ggml_context * gctx = ggml_init(gp);
-    ggml_tensor * ht = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, n_tok);
-    memcpy(tensor_data(ht), hiddens, n_tok * n_embd * sizeof(float)); delete[] hiddens;
+    // Python only projects last hidden_patch_size=1 hidden states, not all
+    ggml_tensor * ht = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, 1);
+    memcpy(tensor_data(ht), hiddens + (n_tok-1)*n_embd, n_embd * sizeof(float)); delete[] hiddens;
     ggml_tensor * cond_llm = ggml_mul_mat(gctx, dit.hidden_proj_w, ht);
     if (dit.hidden_proj_b) cond_llm = ggml_add(gctx, cond_llm, dit.hidden_proj_b);
     { ggml_cgraph * cgf = ggml_new_graph(gctx); ggml_build_forward_expand(cgf, cond_llm); ggml_graph_compute_with_ctx(gctx, cgf, n_threads); }
-    { float * cd = tensor_data(cond_llm); float r=0; for(int i=0;i<DIT_HIDDEN_SIZE*n_tok;i++) r+=cd[i]*cd[i];
-      printf("  hidden_proj: [%d x %d] RMS=%.4f\n", DIT_HIDDEN_SIZE, n_tok, sqrtf(r/(DIT_HIDDEN_SIZE*n_tok)));
-      if (dump_debug) { FILE * f=fopen("debug_hidden_proj.bin","wb"); if(f){fwrite(cd,sizeof(float),DIT_HIDDEN_SIZE*n_tok,f);fclose(f);} } }
+    { float * cd = tensor_data(cond_llm); float r=0; for(int i=0;i<DIT_HIDDEN_SIZE;i++) r+=cd[i]*cd[i];
+      printf("  hidden_proj: [%d x 1] RMS=%.4f\n", DIT_HIDDEN_SIZE, sqrtf(r/DIT_HIDDEN_SIZE));
+      if (dump_debug) { FILE * f=fopen("debug_hidden_proj.bin","wb"); if(f){fwrite(cd,sizeof(float),DIT_HIDDEN_SIZE,f);fclose(f);} } }
 
     t_load = now_ms() - t1; t_gen_start = now_ms();
 
@@ -170,8 +171,8 @@ int main(int argc, char ** argv) {
     float dt = 1.0f / nfe;
     int frames_per_call = patch_size, n_frames_total = n_calls * frames_per_call, history_len = 0, total_frames = 0;
     float * all_latents = new float[n_frames_total * latent_dim], * z_t = new float[patch_flat], * v_t = new float[patch_flat];
-    float * cond_llm_data = new float[DIT_HIDDEN_SIZE * (n_tok + n_calls)];
-    memcpy(cond_llm_data, tensor_data(cond_llm), DIT_HIDDEN_SIZE * n_tok * sizeof(float));
+    float * cond_llm_data = new float[DIT_HIDDEN_SIZE * (1 + n_calls)];
+    memcpy(cond_llm_data, tensor_data(cond_llm), DIT_HIDDEN_SIZE * 1 * sizeof(float));
     float * history_latents = new float[n_frames_total * latent_dim];
 
     // Free gctx after copying — manual DiT doesn't need it
@@ -185,7 +186,7 @@ int main(int argc, char ** argv) {
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
-            int cur_n_tok = n_tok + call, cond_seq = cur_n_tok + history_len + patch_size;
+            int cur_n_tok = 1 + call, cond_seq = cur_n_tok + history_len + patch_size;
             if (cond_seq < 8) cond_seq = 8;
             int noise_pos = cur_n_tok + history_len;
             // Build input in plain array (no ggml)
@@ -287,8 +288,9 @@ int main(int argc, char ** argv) {
             { for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;} }
         }
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
-        for (int i = 0; i < latent_dim; i++) { float v = z_t[i]; if(v>5)v=5; if(v<-5)v=-5; history_latents[history_len*latent_dim+i] = v; }
-        history_len++; total_frames += frames_per_call;
+        // Store ALL frames_per_call frames as history (matches Python _append_history_chunk)
+        memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
+        history_len += frames_per_call; total_frames += frames_per_call;
 
         // Recreate gctx for PatchEncoder
         if (pe.in_proj_w && call < n_calls - 1) {
@@ -311,13 +313,13 @@ int main(int argc, char ** argv) {
                         float * cnd = (float*)tensor_data(cn);
                         float crms = 0; for(int j=0;j<DIT_HIDDEN_SIZE;j++) crms += cnd[j]*cnd[j]; crms = sqrtf(crms/DIT_HIDDEN_SIZE);
                         if (crms > 0.01f && crms < 100.0f && !std::isnan(crms))
-                            memcpy(cond_llm_data + (n_tok+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
+                            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
                         else
-                            memcpy(cond_llm_data + (n_tok+call)*DIT_HIDDEN_SIZE, pe_data, DIT_HIDDEN_SIZE*sizeof(float)); }
+                            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, pe_data, DIT_HIDDEN_SIZE*sizeof(float)); }
                 }
                 llama_batch_free(eb);
             } else {
-                memcpy(cond_llm_data + (n_tok+call)*DIT_HIDDEN_SIZE, pe_data, DIT_HIDDEN_SIZE*sizeof(float));
+                memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, pe_data, DIT_HIDDEN_SIZE*sizeof(float));
             }
         }
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
