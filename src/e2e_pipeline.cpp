@@ -186,8 +186,8 @@ int main(int argc, char ** argv) {
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
-            int cur_n_tok = 1 + call, cond_seq = cur_n_tok + history_len + patch_size;
-            if (cond_seq < 8) cond_seq = 8;
+            int cur_n_tok = 1 + call;
+            int cond_seq = cur_n_tok + history_len + patch_size;
             int noise_pos = cur_n_tok + history_len;
             // Build input in plain array (no ggml)
             float * dx_data = new float[cond_seq * DIT_HIDDEN_SIZE];
