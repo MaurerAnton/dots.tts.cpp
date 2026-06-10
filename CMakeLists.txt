@@ -167,7 +167,6 @@ target_link_libraries(test_pipeline_sim PRIVATE ggml pthread m)
 
 # ---- Clean comparison test ----
 add_executable(test_clean_cmp test/test_clean_cmp.cpp
-    src/modules/backbone/dit_attention.cpp
     src/utils/safetensors.cpp src/utils/dit_loader.cpp)
 target_include_directories(test_clean_cmp PRIVATE
     ${CMAKE_SOURCE_DIR}/include
