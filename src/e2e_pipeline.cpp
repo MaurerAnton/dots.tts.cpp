@@ -126,8 +126,9 @@ int main(int argc, char ** argv) {
     printf("  DiT: %d layers, PE: loaded\n", DIT_NUM_LAYERS);
 
     float spk_emb[512] = {0};
-    { FILE * f = fopen("speaker_emb.bin", "rb"); if (f) { fread(spk_emb, sizeof(float), 512, f); fclose(f); } else speaker_embedding_from_name(speaker_name, spk_emb); }
-    printf("  Speaker: '%s'\n", speaker_name);
+    // Use zero speaker embedding to match Python calibration
+    // { FILE * f = fopen("speaker_emb.bin", "rb"); if (f) { fread(spk_emb, sizeof(float), 512, f); fclose(f); } else speaker_embedding_from_name(speaker_name, spk_emb); }
+    printf("  Speaker: zeros (matching calibration)\n");
 
     // === Conditioning ===
     printf("[3] Conditioning...\n");
@@ -182,9 +183,19 @@ int main(int argc, char ** argv) {
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
             // Call manual DiT forward
             float * out_data = new float[cond_seq * VAE_LATENT_DIM];
+            // Dump input for Python comparison
+            if (step == 0 && call == 0) {
+                FILE * f = fopen("debug/cpp_dit_input.bin", "wb");
+                if (f) { fwrite(dx_data, sizeof(float), cond_seq * DIT_HIDDEN_SIZE, f); fclose(f); }
+            }
             dit_forward_raw(dit, dx_data, cond_seq, t, spk_emb, out_data);
             { float r=0; for(int i=0;i<cond_seq*VAE_LATENT_DIM;i++) r+=out_data[i]*out_data[i];
-              fprintf(stderr, "  dit_raw_out rms=%.4f\n", sqrtf(r/(cond_seq*VAE_LATENT_DIM))); }
+              fprintf(stderr, "  dit_raw_out rms=%.4f\n", sqrtf(r/(cond_seq*VAE_LATENT_DIM)));
+              // Dump first step velocity for comparison with Python
+              if (step == 0 && call == 0) {
+                  FILE * f = fopen("debug/cpp_velocity.bin", "wb");
+                  if (f) { fwrite(out_data, sizeof(float), cond_seq * VAE_LATENT_DIM, f); fclose(f); }
+              } }
             float * vdata = out_data; bool has_nan = false;
             // Extract velocity for noise positions
             for (int p = 0; p < patch_size; p++) {
