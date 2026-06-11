@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Anton Maurer
 
-// dots.tts.cpp - PatchEncoder implementation
-// 24-layer causal streaming transformer encoder
+// PatchEncoder: ggml graph for Q/K/V, then CPU per-head qk_norm, then ggml for attention+FFN
+// This avoids the in-graph reshape/permute issue.
 
 #include "patchenc.h"
 #include "dots_tts.h"
@@ -14,316 +14,223 @@
 #include <cstdio>
 
 // ===========================================================================
-// Causal Conv1d: kernel=2, stride=2, causal (no future leakage)
-// Simulated with ggml: conv1d not directly available, use IM2COL + MUL_MAT
-// For simplicity, implement as a manual operation
-// Input: [seq, channels] -> Output: [seq/2, channels]
+// Causal Conv1d (separate input buffer)
 // ===========================================================================
-
-static void causal_conv1d_stride2(
-    ggml_context * ctx,
-    ggml_tensor * x,           // [seq, channels] input
-    ggml_tensor * weight,      // [out_ch, in_ch, kernel] = [128, 128, 2]
-    ggml_tensor * bias,        // [out_ch]
-    int seq_len,
-    int channels
-) {
-    // For MVP: do the conv manually in float and store back
-    // x is [seq, channels] — after reshape from [channels, seq] ggml layout
-    // Actually the ggml layout for 2D tensor is [ne0, ne1] = [channels, seq]
-    // We'll do a manual CPU conv since ggml CONV_1D isn't available
-    
-    float * x_data = tensor_data(x);
-    float * w_data = tensor_data(weight);
-    float * b_data = bias ? tensor_data(bias) : nullptr;
-
-    int out_seq = seq_len / 2;  // stride 2
-    int kernel = 2;
-
-    // Causal: for output position i, input is [2*i-1, 2*i] (no future)
-    for (int o = 0; o < out_seq; o++) {
+static void causal_conv1d_stride2(ggml_context * ctx, ggml_tensor * x,
+    ggml_tensor * weight, ggml_tensor * bias, int seq_len, int channels) {
+    float * xd = (float*)malloc(seq_len * channels * sizeof(float));
+    memcpy(xd, tensor_data(x), seq_len * channels * sizeof(float));
+    float * wd = tensor_data(weight);
+    float * bd = bias ? tensor_data(bias) : nullptr;
+    float * od = tensor_data(x);
+    int out_seq = seq_len / 2;
+    for (int o = 0; o < out_seq; o++)
         for (int oc = 0; oc < channels; oc++) {
-            float sum = b_data ? b_data[oc] : 0.0f;
-            for (int k = 0; k < kernel; k++) {
-                int inp_idx = 2 * o + k - (kernel - 1);  // causal offset
-                if (inp_idx >= 0 && inp_idx < seq_len) {
-                    for (int ic = 0; ic < channels; ic++) {
-                        // weight layout: [out_ch, in_ch, kernel] -> w[oc, ic, k]
-                        sum += x_data[inp_idx * channels + ic] *
-                               w_data[(oc * channels + ic) * kernel + k];
-                    }
-                }
+            float s = bd ? bd[oc] : 0;
+            for (int ic = 0; ic < channels; ic++) {
+                int wb = (oc * channels + ic) * 2;
+                int i0 = 2*o - 1; if (i0 >= 0 && i0 < seq_len) s += xd[i0*channels + ic] * wd[wb+0];
+                int i1 = 2*o;     if (i1 >= 0 && i1 < seq_len) s += xd[i1*channels + ic] * wd[wb+1];
             }
-            x_data[o * channels + oc] = sum;
+            od[o*channels + oc] = s;
         }
-    }
-    // Zero out remaining positions
-    memset(x_data + out_seq * channels, 0, (seq_len - out_seq) * channels * sizeof(float));
+    memset(od + out_seq * channels, 0, (seq_len - out_seq) * channels * sizeof(float));
+    free(xd);
 }
 
 // ===========================================================================
-// Simple self-attention (causal) for encoder layers
-// Same as DiT attention but without adaLN, with causal mask
+// CPU per-head qk_norm
 // ===========================================================================
+static void per_head_qk_norm_cpu(float * qd, float * kd, int hidden, int n_tokens,
+                                  int n_heads, int head_dim) {
+    for (int t = 0; t < n_tokens; t++)
+        for (int h = 0; h < n_heads; h++) {
+            float rq=0, rk=0; int base = h*head_dim + t*hidden;
+            for (int d=0; d<head_dim; d++) { rq += qd[base+d]*qd[base+d]; rk += kd[base+d]*kd[base+d]; }
+            rq = sqrtf(rq/head_dim + 1e-6f); rk = sqrtf(rk/head_dim + 1e-6f);
+            for (int d=0; d<head_dim; d++) { qd[base+d] /= rq; kd[base+d] /= rk; }
+        }
+}
 
-static ggml_tensor * enc_attention(
-    ggml_context * ctx,
-    ggml_tensor * x,           // [hidden, n_tokens]
-    ggml_tensor * q_weight,    // [hidden, hidden]
-    ggml_tensor * k_weight,    // [hidden, hidden]
-    ggml_tensor * v_weight,    // [hidden, hidden]
-    ggml_tensor * o_weight,    // [hidden, hidden]
-    int seq_len,
-    int n_batch,
-    int n_heads,
-    int head_dim,
-    ggml_tensor * q_norm_w,
-    ggml_tensor * k_norm_w
-) {
-    int hidden  = n_heads * head_dim;
-    int n_tokens = seq_len * n_batch;
-
-    // Separate Q, K, V projections
-    ggml_tensor * q = ggml_mul_mat(ctx, q_weight, x); // [hidden, n_tokens]
-    ggml_tensor * k = ggml_mul_mat(ctx, k_weight, x);
-    ggml_tensor *    v = ggml_mul_mat(ctx, v_weight, x);
-
-    q = ggml_cont(ctx, q);
-    k = ggml_cont(ctx, k);
-    v = ggml_cont(ctx, v);
-
-    // qk_norm
-    if (q_norm_w) {
-        q = ggml_rms_norm(ctx, q, 1e-6f);
-        q = ggml_mul(ctx, q, q_norm_w);
+// ===========================================================================
+// Per-head attention on CPU (Python: separate scores + softmax per head)
+// Input: q/k/v [hidden, n_tokens] in ggml layout (i + t*hidden)
+// ===========================================================================
+static void per_head_attention_cpu(float * out_ctx,  // [hidden, n_tokens] output context
+    const float * q, const float * k, const float * v,
+    int n_tokens, int n_heads, int head_dim) {
+    int hidden = n_heads * head_dim;
+    memset(out_ctx, 0, hidden * n_tokens * sizeof(float));
+    float scale = 1.0f / sqrtf((float)head_dim);
+    float * scores = (float*)malloc(n_tokens * n_tokens * sizeof(float));
+    
+    for (int h = 0; h < n_heads; h++) {
+        // Scores for this head
+        for (int ti = 0; ti < n_tokens; ti++) {
+            for (int tj = 0; tj < n_tokens; tj++) {
+                float s = 0;
+                for (int d = 0; d < head_dim; d++)
+                    s += q[(h*head_dim+d) + ti*hidden] * k[(h*head_dim+d) + tj*hidden];
+                scores[ti*n_tokens + tj] = s * scale;
+            }
+            // Causal mask
+            for (int tj = ti + 1; tj < n_tokens; tj++)
+                scores[ti*n_tokens + tj] = -INFINITY;
+            // Softmax
+            float max_s = scores[ti*n_tokens];
+            for (int tj = 1; tj < n_tokens; tj++)
+                if (scores[ti*n_tokens+tj] > max_s) max_s = scores[ti*n_tokens+tj];
+            float sum_exp = 0;
+            for (int tj = 0; tj < n_tokens; tj++) {
+                scores[ti*n_tokens+tj] = expf(scores[ti*n_tokens+tj] - max_s);
+                sum_exp += scores[ti*n_tokens+tj];
+            }
+            for (int tj = 0; tj < n_tokens; tj++)
+                scores[ti*n_tokens+tj] /= sum_exp;
+        }
+        // Weighted sum of V for this head
+        for (int ti = 0; ti < n_tokens; ti++)
+            for (int d = 0; d < head_dim; d++) {
+                float s = 0;
+                for (int tj = 0; tj < n_tokens; tj++)
+                    s += scores[ti*n_tokens+tj] * v[(h*head_dim+d) + tj*hidden];
+                out_ctx[(h*head_dim+d) + ti*hidden] += s;
+            }
     }
-    if (k_norm_w) {
-        k = ggml_rms_norm(ctx, k, 1e-6f);
-        k = ggml_mul(ctx, k, k_norm_w);
-    }
+    free(scores);
+}
 
-    // RoPE: reshape to [head_dim, n_heads, n_tokens]
+// ===========================================================================
+// Attention graph (RoPE only, then CPU per-head attention)
+// ===========================================================================
+static ggml_tensor * build_attn_graph(ggml_context * ctx,
+    ggml_tensor * q, ggml_tensor * k, ggml_tensor * v,
+    ggml_tensor * ow, ggml_tensor * ob, int n_tokens, int n_heads, int head_dim) {
+    int hidden = n_heads * head_dim;
+    // RoPE via ggml
     q = ggml_reshape_3d(ctx, q, head_dim, n_heads, n_tokens);
     k = ggml_reshape_3d(ctx, k, head_dim, n_heads, n_tokens);
-
-    // Position IDs
     ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
-    {
-        int * pd = (int *)tensor_data(pos);
-        for (int b = 0; b < n_batch; b++)
-            for (int s = 0; s < seq_len; s++)
-                pd[b * seq_len + s] = s;
-    }
-
+    { int *pd = (int*)tensor_data(pos); for(int s=0;s<n_tokens;s++) pd[s]=s; }
     q = ggml_rope(ctx, q, pos, head_dim, 0);
     k = ggml_rope(ctx, k, pos, head_dim, 0);
+    // Compute RoPE graph
+    { ggml_cgraph * cg = ggml_new_graph(ctx); ggml_build_forward_expand(cg, q);
+      ggml_build_forward_expand(cg, k); ggml_graph_compute_with_ctx(ctx, cg, 8); }
+    
+    // Extract data for CPU per-head attention
+    float * qd = (float*)malloc(hidden * n_tokens * sizeof(float));
+    float * kd = (float*)malloc(hidden * n_tokens * sizeof(float));
+    float * vd = (float*)malloc(hidden * n_tokens * sizeof(float));
+    memcpy(qd, tensor_data(q), hidden * n_tokens * sizeof(float));
+    memcpy(kd, tensor_data(k), hidden * n_tokens * sizeof(float));
+    memcpy(vd, tensor_data(v), hidden * n_tokens * sizeof(float));
+    
+    float * ctx_d = (float*)malloc(hidden * n_tokens * sizeof(float));
+    per_head_attention_cpu(ctx_d, qd, kd, vd, n_tokens, n_heads, head_dim);
+    free(qd); free(kd); free(vd);
+    
+    // O-proj via ggml
+    ggml_tensor * ao = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+    memcpy(tensor_data(ao), ctx_d, hidden * n_tokens * sizeof(float));
+    free(ctx_d);
+    
+    ao = ggml_mul_mat(ctx, ow, ao);
+    if (ob) { ggml_tensor * ob2 = ggml_reshape_2d(ctx, ob, hidden, 1); ao = ggml_add(ctx, ao, ob2); }
+    return ao;
+}
 
-    // Attention: Q^T @ K / sqrt(d) with causal mask
-    ggml_tensor * Qf = ggml_reshape_2d(ctx, q, hidden, n_tokens);
-    ggml_tensor * Kf = ggml_reshape_2d(ctx, k, hidden, n_tokens);
-    ggml_tensor * Vf = ggml_reshape_2d(ctx, v, hidden, n_tokens);
+// ===========================================================================
+// Full forward — Q/K/V via ggml, CPU per-head norm, ggml attention+FFN per layer
+// ===========================================================================
+ggml_tensor * patchenc_forward(patch_encoder & enc, ggml_context * ctx,
+    ggml_tensor * x, int n_patches) {
+    int seq = n_patches * PATCHENC_PATCH_SIZE, ch = PATCHENC_LATENT_DIM;
+    causal_conv1d_stride2(ctx, x, enc.conv_weight, enc.conv_bias, seq, ch);
+    int conv_seq = seq / 2, n_tokens = conv_seq, n_batch = 1;
+    int hidden = PATCHENC_HIDDEN;
 
-    ggml_tensor * scores = ggml_mul_mat(ctx, Qf, Kf); // [n_tokens, n_tokens]
-    scores = ggml_scale(ctx, scores, 1.0f / sqrtf((float)head_dim));
+    // in_proj + compute
+    ggml_tensor * xc = ggml_view_2d(ctx, x, ch, conv_seq, x->nb[1], 0); xc = ggml_cont(ctx, xc);
+    ggml_tensor * h = ggml_mul_mat(ctx, enc.in_proj_w, xc);
+    if (enc.in_proj_b) { ggml_tensor * ib = ggml_reshape_2d(ctx, enc.in_proj_b, hidden, 1); h = ggml_add(ctx, h, ib); }
+    { ggml_cgraph * cg = ggml_new_graph(ctx); ggml_build_forward_expand(cg, h); ggml_graph_compute_with_ctx(ctx, cg, 8); }
 
-    // Causal mask: zero out upper triangle
-    // Use diag_mask_inf for causal masking
-    scores = ggml_diag_mask_inf(ctx, scores, 1); // 1 = future tokens masked
+    // Allocate buffer for hidden state between layers
+    float * hd = (float*)malloc(hidden * n_tokens * sizeof(float));
+    memcpy(hd, tensor_data(h), hidden * n_tokens * sizeof(float));
 
-    scores = ggml_soft_max(ctx, scores);
+    for (int i = 0; i < enc.n_layers; i++) {
+        patchenc_layer & l = enc.layers[i];
+        ggml_reset(ctx);
 
-    // Output: scores @ V^T
-    ggml_tensor * Vt = ggml_cont(ctx, ggml_permute(ctx, Vf, 1, 0, 2, 3));
-    ggml_tensor * attn_out = ggml_mul_mat(ctx, scores, Vt); // [n_tokens, hidden]
-    attn_out = ggml_cont(ctx, ggml_permute(ctx, attn_out, 1, 0, 2, 3)); // [hidden, n_tokens]
+        // Input tensor
+        ggml_tensor * xi = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+        memcpy(tensor_data(xi), hd, hidden * n_tokens * sizeof(float));
+
+        // attn_norm
+        ggml_tensor * xn = ggml_rms_norm(ctx, xi, 1e-6f);
+        if (l.attn_norm_w) xn = ggml_mul(ctx, xn, l.attn_norm_w);
+
+        // Q/K/V projections via ggml
+        ggml_tensor * q = ggml_mul_mat(ctx, l.attn_q_weight, xn);
+        ggml_tensor * k = ggml_mul_mat(ctx, l.attn_k_weight, xn);
+        ggml_tensor * v = ggml_mul_mat(ctx, l.attn_v_weight, xn);
+        q = ggml_cont(ctx, q); k = ggml_cont(ctx, k); v = ggml_cont(ctx, v);
+
+        // Compute Q/K/V graph and extract data for CPU per-head norm
+        { ggml_cgraph * cg = ggml_new_graph(ctx); ggml_build_forward_expand(cg, q);
+          ggml_build_forward_expand(cg, k); ggml_build_forward_expand(cg, v);
+          ggml_graph_compute_with_ctx(ctx, cg, 8); }
+
+        float * qd = (float*)malloc(hidden * n_tokens * sizeof(float));
+        float * kd = (float*)malloc(hidden * n_tokens * sizeof(float));
+        float * vd = (float*)malloc(hidden * n_tokens * sizeof(float));
+        memcpy(qd, tensor_data(q), hidden * n_tokens * sizeof(float));
+        memcpy(kd, tensor_data(k), hidden * n_tokens * sizeof(float));
+        memcpy(vd, tensor_data(v), hidden * n_tokens * sizeof(float));
+
+        // qk_norm: Python uses Identity (despite config qk_norm=True — model saved without weights)
+        // Do NOT apply per-head norm — Python doesn't
+
+        // --- Build ggml graph for attention + FFN ---
+        ggml_tensor * qn = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+        ggml_tensor * kn = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+        ggml_tensor * vn = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+        memcpy(tensor_data(qn), qd, hidden * n_tokens * sizeof(float));
+        memcpy(tensor_data(kn), kd, hidden * n_tokens * sizeof(float));
+        memcpy(tensor_data(vn), vd, hidden * n_tokens * sizeof(float));
+        free(qd); free(kd); free(vd);
+
+        ggml_tensor * attn = build_attn_graph(ctx, qn, kn, vn, l.attn_o_weight, l.attn_o_bias,
+            n_tokens, PATCHENC_NUM_HEADS, PATCHENC_HEAD_SIZE);
+        ggml_tensor * h1 = ggml_add(ctx, xi, attn);
+
+        // FFN
+        ggml_tensor * hn = ggml_rms_norm(ctx, h1, 1e-6f);
+        if (l.ffn_norm_w) hn = ggml_mul(ctx, hn, l.ffn_norm_w);
+        ggml_tensor * ff = ggml_mul_mat(ctx, l.ffn_w1, hn);
+        if (l.ffn_b1) { ggml_tensor * fb = ggml_reshape_2d(ctx, l.ffn_b1, PATCHENC_FFN_SIZE, 1); ff = ggml_add(ctx, ff, fb); }
+        ff = ggml_silu(ctx, ff);
+        ff = ggml_mul_mat(ctx, l.ffn_w2, ff);
+        if (l.ffn_b2) { ggml_tensor * fb = ggml_reshape_2d(ctx, l.ffn_b2, hidden, 1); ff = ggml_add(ctx, ff, fb); }
+        ggml_tensor * ho = ggml_add(ctx, h1, ff);
+
+        // Compute and extract
+        { ggml_cgraph * cg = ggml_new_graph(ctx); ggml_build_forward_expand(cg, ho);
+          ggml_graph_compute_with_ctx(ctx, cg, 8); }
+        memcpy(hd, tensor_data(ho), hidden * n_tokens * sizeof(float));
+    }
 
     // Output projection
-    attn_out = ggml_mul_mat(ctx, o_weight, attn_out);
-
-    return attn_out;
-}
-
-// ===========================================================================
-// Encoder layer forward: pre-norm + attn + pre-norm + FFN (no adaLN)
-// ===========================================================================
-
-static ggml_tensor * enc_layer_forward(
-    ggml_context * ctx,
-    ggml_tensor * x,           // [hidden, n_tokens]
-    patchenc_layer & layer,
-    int seq_len,
-    int n_batch
-) {
-    int hidden = PATCHENC_HIDDEN;
-    int n_tokens = seq_len * n_batch;
-
-    // Self-attention with pre-norm
-    ggml_tensor * h = ggml_rms_norm(ctx, x, 1e-6f);
-    if (layer.attn_norm_w) h = ggml_mul(ctx, h, layer.attn_norm_w);
-
-    ggml_tensor * attn = enc_attention(ctx, h,
-        layer.attn_q_weight, layer.attn_k_weight, layer.attn_v_weight,
-        layer.attn_o_weight,
-        seq_len, n_batch, PATCHENC_NUM_HEADS, PATCHENC_HEAD_SIZE,
-        layer.q_norm_w, layer.k_norm_w);
-
-    x = ggml_add(ctx, x, attn);
-
-    // FFN with pre-norm
-    h = ggml_rms_norm(ctx, x, 1e-6f);
-    if (layer.ffn_norm_w) h = ggml_mul(ctx, h, layer.ffn_norm_w);
-
-    ggml_tensor * ffn = ggml_mul_mat(ctx, layer.ffn_w1, h); // [ffn, n_tokens]
-    ffn = ggml_silu(ctx, ffn);
-    ffn = ggml_mul_mat(ctx, layer.ffn_w2, ffn);             // [hidden, n_tokens]
-
-    x = ggml_add(ctx, x, ffn);
-
-    return x;
-}
-
-// ===========================================================================
-// Full forward pass (non-streaming)
-// ===========================================================================
-
-ggml_tensor * patchenc_forward(
-    patch_encoder & enc,
-    ggml_context * ctx,
-    ggml_tensor * x,           // [n_patches * patch_size, latent_dim]
-    int n_patches
-) {
-    int seq = n_patches * PATCHENC_PATCH_SIZE;
-    int ch  = PATCHENC_LATENT_DIM;
-
-    // 1. Causal Conv1d: [seq, ch] -> [seq/2, ch] (stride 2)
-    // x is in ggml layout: [ch, seq] after reshape
-    // Do manual conv (stores result back in x's first half)
-    causal_conv1d_stride2(ctx, x, enc.conv_weight, enc.conv_bias, seq, ch);
-    int conv_seq = seq / 2;  // = n_patches * 2 (since patch_size=4, /2 = 2 per patch)
-    // Actually: n_patches * 4 -> conv -> n_patches * 2 positions
-
-    // 2. Input projection: Linear(128 -> 1024)
-    // x currently [ch, seq] in memory but we overwrote first conv_seq*ch elements
-    // Create view of first conv_seq elements, reshape to [ch, conv_seq]
-    ggml_tensor * x_conv = ggml_view_2d(ctx, x, ch, conv_seq, x->nb[1], 0);
-    x_conv = ggml_cont(ctx, x_conv);
-    ggml_tensor * h = ggml_mul_mat(ctx, enc.in_proj_w, x_conv); // [hidden, conv_seq]
-    // bias skipped: ggml requires same shape for add
-
-    int n_batch = 1;
-    int n_tokens = conv_seq;
-
-    // 3. 24 causal transformer layers
-    for (int i = 0; i < enc.n_layers; i++) {
-        h = enc_layer_forward(ctx, h, enc.layers[i], n_tokens, n_batch);
-    }
-
-    // 4. Final norm
-    h = ggml_rms_norm(ctx, h, 1e-6f);
-    if (enc.final_norm_w) h = ggml_mul(ctx, h, enc.final_norm_w);
-
-    // 5. Output: reshape [hidden, n_patches*2] -> [hidden, 2, n_patches]
-    // Take first frame per patch -> [hidden, n_patches], project to LLM dim
-    ggml_tensor * h3d = ggml_reshape_3d(ctx, h, PATCHENC_HIDDEN, 2, n_patches);
-    h3d = ggml_cont(ctx, ggml_permute(ctx, h3d, 0, 2, 1, 3)); // [hidden, n_patches, 2]
-    ggml_tensor * h_first = ggml_view_2d(ctx, h3d, PATCHENC_HIDDEN, n_patches,
-        h3d->nb[1], 0);
-    h_first = ggml_cont(ctx, h_first);
-
-    // Simple projection: [hidden] -> [1536] (skip 2*hidden concat for MVP)
-    // Use out_proj modified to accept [hidden] instead of [2*hidden]
-    // For now, use just the first half: out_proj_w viewed as [hidden, 1536]
-    ggml_tensor * out_w = ggml_view_2d(ctx, enc.out_proj_w, PATCHENC_HIDDEN, 1536,
-        enc.out_proj_w->nb[1], 0);
-    out_w = ggml_cont(ctx, out_w);
-    ggml_tensor * out = ggml_mul_mat(ctx, out_w, h_first); // [1536, n_patches]
-    // bias skipped for same-shape requirement
-
-    return out; // [1536, n_patches]
-}
-
-// ===========================================================================
-// Streaming state
-// ===========================================================================
-
-struct patchenc_stream_state {
-    // Conv tail buffer: stores last (kernel-1) input positions for causal conv
-    float conv_tail[(2-1) * PATCHENC_LATENT_DIM]; // 1 position tail
-
-    // KV caches for each layer: one per layer
-    // For simplicity in MVP, store full history (non-streaming mode)
-    // TODO: implement true KV cache streaming
-    int pos;  // current position in sequence
-    
-    // Accumulated hidden states for output projection
-    float * hidden_history;
-    int max_history;
-    int cur_history;
-};
-
-patchenc_stream_state * patchenc_stream_init(patch_encoder & enc) {
-    (void)enc;
-    patchenc_stream_state * st = new patchenc_stream_state();
-    memset(st->conv_tail, 0, sizeof(st->conv_tail));
-    st->pos = 0;
-    st->max_history = 1024;
-    st->cur_history = 0;
-    st->hidden_history = new float[st->max_history * PATCHENC_HIDDEN]();
-    return st;
-}
-
-void patchenc_stream_free(patchenc_stream_state * st) {
-    delete[] st->hidden_history;
-    delete st;
-}
-
-void patchenc_decode_step(
-    patch_encoder & enc,
-    patchenc_stream_state * st,
-    ggml_context * ctx,
-    float * patch,             // [patch_size * latent_dim]
-    float * llm_emb_out)       // [1536]
-{
-    // For MVP: just run full non-streaming forward on accumulated patches
-    // This is correct but not truly streaming
-    // TODO: implement incremental decode with KV caching
-
-    int patch_flat = PATCHENC_PATCH_SIZE * PATCHENC_LATENT_DIM;
-    
-    // Accumulate patch
-    if (st->cur_history + PATCHENC_PATCH_SIZE > st->max_history) {
-        // Grow buffer
-        int new_max = st->max_history * 2;
-        float * new_buf = new float[new_max * PATCHENC_LATENT_DIM]();
-        memcpy(new_buf, st->hidden_history, 
-               st->cur_history * PATCHENC_LATENT_DIM * sizeof(float));
-        delete[] st->hidden_history;
-        st->hidden_history = new_buf;
-        st->max_history = new_max;
-    }
-    
-    memcpy(st->hidden_history + st->cur_history * PATCHENC_LATENT_DIM,
-           patch, patch_flat * sizeof(float));
-    st->cur_history += PATCHENC_PATCH_SIZE;
-
-    int n_patches = st->cur_history / PATCHENC_PATCH_SIZE;
-    int seq = st->cur_history;
-
-    // Build input tensor
-    ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, PATCHENC_LATENT_DIM, seq);
-    memcpy(tensor_data(x), st->hidden_history, seq * PATCHENC_LATENT_DIM * sizeof(float));
-
-    // Run forward
-    ggml_tensor * out = patchenc_forward(enc, ctx, x, n_patches); // [1536, n_patches]
-
-    // Compute graph
-    ggml_cgraph * gf = ggml_new_graph(ctx);
-    ggml_build_forward_expand(gf, out);
-    ggml_graph_compute_with_ctx(ctx, gf, 8);
-
-    // Extract last patch's embedding
-    float * out_data = tensor_data(out);
-    memcpy(llm_emb_out, out_data + (n_patches - 1) * 1536, 1536 * sizeof(float));
-
     ggml_reset(ctx);
+    ggml_tensor * ht = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, n_tokens);
+    memcpy(tensor_data(ht), hd, hidden * n_tokens * sizeof(float));
+    free(hd);
+    ggml_tensor * h3 = ggml_reshape_3d(ctx, ht, hidden, 2, n_patches);
+    h3 = ggml_cont(ctx, ggml_permute(ctx, h3, 0, 2, 1, 3));
+    ggml_tensor * hc = ggml_reshape_2d(ctx, h3, hidden*2, n_patches); hc = ggml_cont(ctx, hc);
+    ggml_tensor * out = ggml_mul_mat(ctx, enc.out_proj_w, hc);
+    if (enc.out_proj_b) { ggml_tensor * ob = ggml_reshape_2d(ctx, enc.out_proj_b, 1536, 1); out = ggml_add(ctx, out, ob); }
+    return out;
 }

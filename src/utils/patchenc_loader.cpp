@@ -20,6 +20,7 @@ bool load_patchenc_weights(SafeTensorsFile & sf, ggml_context * w_ctx, patch_enc
     enc.latent_dim = PATCHENC_LATENT_DIM;
     enc.patch_size = PATCHENC_PATCH_SIZE;
     enc.layers.resize(enc.n_layers);
+    enc.final_norm_w = nullptr;  // no final_norm in PatchEncoder
 
     auto load = [&](const char * sf_name, ggml_tensor * & field) {
         const st_tensor_info * info = sf.find(sf_name);

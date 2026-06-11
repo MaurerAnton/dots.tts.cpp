@@ -179,12 +179,80 @@ target_link_libraries(test_pipeline_sim PRIVATE ggml pthread m)
 
 # ---- Manual LLM test ----
 add_executable(test_manual_llm test/test_manual_llm.cpp
-    src/utils/safetensors.cpp)
+    src/utils/safetensors.cpp src/llm_manual.cpp)
 target_include_directories(test_manual_llm PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
 target_link_libraries(test_manual_llm PRIVATE ggml pthread m)
+
+# ---- KV cache correctness test ----
+add_executable(test_kv_cache test/test_kv_cache_correctness.cpp
+    src/utils/safetensors.cpp src/llm_manual.cpp)
+target_include_directories(test_kv_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_kv_cache PRIVATE ggml pthread m)
+
+# ---- KV cache step test ----
+add_executable(test_kv_step test/test_kv_step.cpp
+    src/utils/safetensors.cpp src/llm_manual.cpp)
+target_include_directories(test_kv_step PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_kv_step PRIVATE ggml pthread m)
+
+# ---- PatchEncoder input test ----
+add_executable(test_pe_input test/test_pe_input.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp
+    src/modules/backbone/patchenc.cpp)
+target_include_directories(test_pe_input PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_pe_input PRIVATE ggml pthread m)
+
+# ---- PE dump layer 0 test ----
+add_executable(test_pe_dump_l0 test/test_pe_dump_l0.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp
+    src/modules/backbone/patchenc.cpp)
+target_include_directories(test_pe_dump_l0 PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_pe_dump_l0 PRIVATE ggml pthread m)
+
+# ---- PE comparison test ----
+add_executable(test_pe_cmp test/test_pe_cmp.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp
+    src/modules/backbone/patchenc.cpp)
+target_include_directories(test_pe_cmp PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_pe_cmp PRIVATE ggml pthread m)
+
+# ---- Conv debug test ----
+add_executable(test_conv_debug test/test_conv_debug.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp
+    src/modules/backbone/patchenc.cpp)
+target_include_directories(test_conv_debug PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_conv_debug PRIVATE ggml pthread m)
+
+# ---- PE layers dump test ----
+add_executable(test_pe_layers test/test_pe_layers.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/utils/patchenc_loader.cpp
+    src/modules/backbone/patchenc.cpp)
+target_include_directories(test_pe_layers PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_pe_layers PRIVATE ggml pthread m)
 
 # ---- Clean comparison test ----
 add_executable(test_clean_cmp test/test_clean_cmp.cpp
