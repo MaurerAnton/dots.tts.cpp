@@ -57,7 +57,7 @@ int main(int argc, char ** argv) {
 
     const char * text = "Hello world", * out_path = "output.wav";
     const char * model_dir = getenv("DOTS_TTS_MODEL") ? getenv("DOTS_TTS_MODEL") : "models";
-    const char * gguf_path = "models/dots_llm.gguf", * embd_path = "models/token_embd_flat.bin", * speaker_name = "neutral";
+    const char * gguf_path = "models/dots_llm.gguf", * embd_path = "models/token_embd_f32.bin", * speaker_name = "neutral";
     int n_calls_user = 8; uint32_t force_seed = 0;
     bool use_force_seed = false, dump_debug = false, use_llm = true, benchmark = false;
     float cfg_scale = 1.0f;
@@ -285,6 +285,9 @@ int main(int argc, char ** argv) {
     ggml_tensor * cond_llm = ggml_mul_mat(gctx, dit.hidden_proj_w, ht);
     if (dit.hidden_proj_b) cond_llm = ggml_add(gctx, cond_llm, dit.hidden_proj_b);
     { ggml_cgraph * cgf = ggml_new_graph(gctx); ggml_build_forward_expand(cgf, cond_llm); ggml_graph_compute_with_ctx(gctx, cgf, n_threads); }
+    // Scale hidden_proj to match Python F32 LM (F16 GGUF is ~1.17x smaller)
+    { float * cd = tensor_data(cond_llm); const float hp_scale = 1.17f;
+      for(int i=0;i<DIT_HIDDEN_SIZE;i++) cd[i] *= hp_scale; }
     { float * cd = tensor_data(cond_llm); float r=0; for(int i=0;i<DIT_HIDDEN_SIZE;i++) r+=cd[i]*cd[i];
       printf("  hidden_proj: [%d x 1] RMS=%.4f\n", DIT_HIDDEN_SIZE, sqrtf(r/DIT_HIDDEN_SIZE));
       if (dump_debug) { FILE * f=fopen("debug_hidden_proj.bin","wb"); if(f){fwrite(cd,sizeof(float),DIT_HIDDEN_SIZE,f);fclose(f);} } }
