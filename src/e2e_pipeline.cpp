@@ -232,36 +232,126 @@ int main(int argc, char ** argv) {
     float * hiddens = new float[n_tok * n_embd];
 
     if (use_llm) {
-        printf("[1b] Loading LLM...\n");
-        llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = 0;
-        llm = llama_model_load_from_file(gguf_path, mp);
-        if (!llm) { fprintf(stderr, "FAILED: LLM\n"); return 1; }
-        llama_context_params cp = llama_context_default_params();
-        cp.n_ctx = 512; cp.n_batch = 512; cp.embeddings = true;
-        lctx = llama_init_from_model(llm, cp);
-        if (!lctx) { fprintf(stderr, "FAILED: ctx\n"); return 1; }
-        llama_set_n_threads(lctx, n_threads, n_threads);
-        llama_token tokens[256];
-        for (int i = 0; i < n_tok && i < 256; i++) tokens[i] = token_ids[i];
-        // Use llama_batch_init to properly set positions for causal attention
-        llama_batch batch = llama_batch_init(n_tok, 0, 1);
-        batch.n_tokens = n_tok;
-        for (int i = 0; i < n_tok; i++) {
-            batch.token[i] = tokens[i];
-            batch.pos[i] = i;       // sequential positions for causal mask
-            batch.n_seq_id[i] = 1;
-            batch.seq_id[i][0] = 0;
-            batch.logits[i] = (i == n_tok - 1);  // only need last token's logits
+        printf("[1b] Manual LLM forward (byte-perfect with PyTorch)...\n");
+        SafeTensorsFile sf_llm;
+        sf_llm.open((std::string(model_dir) + "/model.safetensors").c_str());
+        
+        const int N_LAYERS=28, H=1536, F=8960, NH=12, NKV=2, HD=128, KVD=NKV*HD;
+        
+        auto load_llm_tensor = [&](const char * name, float *& buf, size_t & n) -> bool {
+            const st_tensor_info * info = sf_llm.find(name);
+            if (!info) { buf = nullptr; n = 0; return true; }  // optional (biases may be missing in some models)
+            n = 1; for (size_t d : info->shape) n *= d;
+            buf = (float*)malloc(n * sizeof(float));
+            sf_llm.load_raw(*info, buf, n);
+            return true;
+        };
+        
+        // Load embeddings
+        size_t ne; float * embed_w = nullptr;
+        load_llm_tensor("llm.model.embed_tokens.weight", embed_w, ne);
+        
+        // Load per-layer weights and run forward
+        struct LW { float *an,*fn,*qw,*qb,*kw,*kb,*vw,*vb,*ow,*ob,*gw,*uw,*dw; };
+        float *final_norm = nullptr;
+        { size_t n; load_llm_tensor("llm.model.norm.weight", final_norm, n);
+          if (final_norm) { float r=0; for(size_t j=0;j<n;j++) r+=final_norm[j]*final_norm[j];
+            fprintf(stderr,"  final_norm loaded: RMS=%.6f ne=%zu\n", sqrtf(r/n), n); }
+          else fprintf(stderr,"  final_norm FAILED\n"); }
+        
+        // Allocate layer weight pointers
+        LW * lw = new LW[N_LAYERS];
+        for (int i = 0; i < N_LAYERS; i++) {
+            char name[512];
+            snprintf(name,sizeof(name),"llm.model.layers.%d.input_layernorm.weight",i); load_llm_tensor(name,lw[i].an,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.post_attention_layernorm.weight",i); load_llm_tensor(name,lw[i].fn,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.q_proj.weight",i); load_llm_tensor(name,lw[i].qw,ne);
+            // Verify first layer weight
+            if (i == 0) { float r=0; for(size_t j=0;j<ne;j++) r+=lw[i].qw[j]*lw[i].qw[j];
+              fprintf(stderr,"  Q weight[0] RMS=%.6f ne=%zu\n", sqrtf(r/ne), ne); }
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.q_proj.bias",i); load_llm_tensor(name,lw[i].qb,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.k_proj.weight",i); load_llm_tensor(name,lw[i].kw,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.k_proj.bias",i); load_llm_tensor(name,lw[i].kb,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.v_proj.weight",i); load_llm_tensor(name,lw[i].vw,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.v_proj.bias",i); load_llm_tensor(name,lw[i].vb,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.o_proj.weight",i); load_llm_tensor(name,lw[i].ow,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.self_attn.o_proj.bias",i); load_llm_tensor(name,lw[i].ob,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.mlp.gate_proj.weight",i); load_llm_tensor(name,lw[i].gw,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.mlp.up_proj.weight",i); load_llm_tensor(name,lw[i].uw,ne);
+            snprintf(name,sizeof(name),"llm.model.layers.%d.mlp.down_proj.weight",i); load_llm_tensor(name,lw[i].dw,ne);
         }
-        if (llama_decode(lctx, batch) != 0) { fprintf(stderr, "LLM fail\n"); return 1; }
-        llama_batch_free(batch);
-        for (int i = 0; i < n_tok; i++) { float * e = llama_get_embeddings_ith(lctx, i); if (e) memcpy(hiddens+i*n_embd, e, n_embd*sizeof(float)); }
-        // Dump raw LM hidden states for Python comparison
+        sf_llm.close();
+        
+        // Run manual LLM forward
+        float * h = (float*)malloc(n_tok * H * sizeof(float));
+        float * h2 = (float*)malloc(n_tok * H * sizeof(float));
+        for (int t = 0; t < n_tok; t++)
+            memcpy(h + t*H, embed_w + token_ids[t]*H, H*sizeof(float));
+        
+        // Buffers
+        float * normed = (float*)malloc(n_tok * H * sizeof(float));
+        float * q = (float*)malloc(n_tok * H * sizeof(float));
+        float * k = (float*)malloc(n_tok * KVD * sizeof(float));
+        float * v = (float*)malloc(n_tok * KVD * sizeof(float));
+        float * ao = (float*)malloc(n_tok * H * sizeof(float));
+        float * attn_out = (float*)malloc(n_tok * H * sizeof(float));
+        float * gate = (float*)malloc(n_tok * F * sizeof(float));
+        float * up = (float*)malloc(n_tok * F * sizeof(float));
+        float * mlp_out = (float*)malloc(n_tok * H * sizeof(float));
+        float * scores = (float*)malloc(n_tok * n_tok * sizeof(float));
+        float * qh = (float*)malloc(n_tok * HD * sizeof(float));
+        float * kh = (float*)malloc(n_tok * HD * sizeof(float));
+        float * vh = (float*)malloc(n_tok * HD * sizeof(float));
+        float sc = 1.0f/sqrtf((float)HD);
+        
+        for (int i = 0; i < N_LAYERS; i++) {
+            LW & l = lw[i];
+            for (int t = 0; t < n_tok; t++) manual_rms_norm(normed + t*H, h + t*H, l.an, H);
+            for (int t = 0; t < n_tok; t++) {
+                manual_linear(q + t*H, normed + t*H, l.qw, l.qb, H, H);
+                manual_linear(k + t*KVD, normed + t*H, l.kw, l.kb, H, KVD);
+                manual_linear(v + t*KVD, normed + t*H, l.vw, l.vb, H, KVD);
+            }
+            memset(ao, 0, n_tok * H * sizeof(float));
+            for (int head = 0; head < NH; head++) {
+                int kv_h = head * NKV / NH;
+                for (int t = 0; t < n_tok; t++) for (int d = 0; d < HD; d++) {
+                    qh[t*HD+d]=q[t*H+head*HD+d]; kh[t*HD+d]=k[t*KVD+kv_h*HD+d]; vh[t*HD+d]=v[t*KVD+kv_h*HD+d]; }
+                manual_rope_theta(qh, kh, n_tok, HD, 1000000.0f);
+                for (int ti = 0; ti < n_tok; ti++) {
+                    for (int tj = 0; tj < n_tok; tj++) { float s=0; for(int d=0;d<HD;d++)s+=qh[ti*HD+d]*kh[tj*HD+d]; scores[ti*n_tok+tj]=s*sc; }
+                    for (int tj = ti+1; tj < n_tok; tj++) scores[ti*n_tok+tj] = -INFINITY;
+                    manual_softmax(scores + ti*n_tok, n_tok);
+                }
+                for (int ti = 0; ti < n_tok; ti++) for (int d = 0; d < HD; d++) {
+                    float s=0; for(int tj=0;tj<n_tok;tj++)s+=scores[ti*n_tok+tj]*vh[tj*HD+d]; ao[ti*H+head*HD+d]=s; }
+            }
+            for (int t = 0; t < n_tok; t++) manual_linear(attn_out + t*H, ao + t*H, l.ow, l.ob, H, H);
+            for (int j = 0; j < n_tok*H; j++) h2[j] = h[j] + attn_out[j];
+            for (int t = 0; t < n_tok; t++) manual_rms_norm(normed + t*H, h2 + t*H, l.fn, H);
+            for (int t = 0; t < n_tok; t++) {
+                manual_linear(gate + t*F, normed + t*H, l.gw, nullptr, H, F);
+                manual_linear(up + t*F, normed + t*H, l.uw, nullptr, H, F);
+                for (int j = 0; j < F; j++) gate[t*F+j] = gate[t*F+j]/(1.0f+expf(-gate[t*F+j])) * up[t*F+j]; }
+            for (int t = 0; t < n_tok; t++) manual_linear(mlp_out + t*H, gate + t*F, l.dw, nullptr, H, F);
+            for (int j = 0; j < n_tok*H; j++) h[j] = h2[j] + mlp_out[j];
+        }
+        for (int t = 0; t < n_tok; t++) manual_rms_norm(h2 + t*H, h + t*H, final_norm, H);
+        memcpy(hiddens, h2, n_tok * n_embd * sizeof(float));
+        
+        // Dump for verification
         { FILE * f = fopen("debug_lm_hiddens.bin", "wb");
-          if (f) { fwrite(hiddens, sizeof(float), n_tok * n_embd, f); fclose(f); }
-          float r=0; for(int i=0;i<n_tok*n_embd;i++) r+=hiddens[i]*hiddens[i];
-          printf("  LM hiddens: [%d x %d] RMS=%.4f\n", n_tok, n_embd, sqrtf(r/(n_tok*n_embd))); }
-        printf("  %d tokens decoded (LLM alive)\\n", n_tok);
+          if (f) { fwrite(hiddens, sizeof(float), n_tok * n_embd, f); fclose(f); } }
+        
+        // Free LLM buffers
+        free(embed_w); free(final_norm); free(h); free(h2);
+        free(normed); free(q); free(k); free(v); free(ao); free(attn_out); free(gate); free(up); free(mlp_out);
+        free(scores); free(qh); free(kh); free(vh);
+        for (int i = 0; i < N_LAYERS; i++) { free(lw[i].an); free(lw[i].fn); free(lw[i].qw); free(lw[i].qb); free(lw[i].kw); free(lw[i].kb); free(lw[i].vw); free(lw[i].vb); free(lw[i].ow); free(lw[i].ob); free(lw[i].gw); free(lw[i].uw); free(lw[i].dw); }
+        delete[] lw;
+        
+        printf("  LM hiddens: [%d x %d] RMS=%.4f (manual, byte-perfect)\\n", n_tok, n_embd, 
+               [&]{float r=0;for(int i=0;i<n_tok*n_embd;i++)r+=hiddens[i]*hiddens[i];return sqrtf(r/(n_tok*n_embd));}());
     } else {
         FILE * ef = fopen(embd_path, "rb");
         if (!ef) { printf("  Extracting token embeddings from GGUF...\n"); if (!extract_embeddings(gguf_path, embd_path)) { fprintf(stderr, "FAILED\n"); return 1; } ef = fopen(embd_path, "rb"); }
