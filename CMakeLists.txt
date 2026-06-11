@@ -176,6 +176,15 @@ target_include_directories(test_pipeline_sim PRIVATE
 )
 target_link_libraries(test_pipeline_sim PRIVATE ggml pthread m)
 
+# ---- Manual LLM test ----
+add_executable(test_manual_llm test/test_manual_llm.cpp
+    src/utils/safetensors.cpp)
+target_include_directories(test_manual_llm PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_manual_llm PRIVATE ggml pthread m)
+
 # ---- Clean comparison test ----
 add_executable(test_clean_cmp test/test_clean_cmp.cpp
     src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp src/utils/dit_loader.cpp
