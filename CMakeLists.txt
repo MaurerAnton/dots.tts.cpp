@@ -34,6 +34,7 @@ add_executable(e2e_pipeline
     src/modules/vocoder/bigvgan_cpp.cpp
     src/modules/vocoder/lstm.cpp
     src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
+    src/llm_manual.cpp
     src/utils/dit_loader.cpp
     src/utils/patchenc_loader.cpp
     src/modules/speaker/campp.cpp
