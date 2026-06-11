@@ -243,9 +243,25 @@ int main(int argc, char ** argv) {
         llama_set_n_threads(lctx, n_threads, n_threads);
         llama_token tokens[256];
         for (int i = 0; i < n_tok && i < 256; i++) tokens[i] = token_ids[i];
-        if (llama_decode(lctx, llama_batch_get_one(tokens, n_tok)) != 0) { fprintf(stderr, "LLM fail\n"); return 1; }
+        // Use llama_batch_init to properly set positions for causal attention
+        llama_batch batch = llama_batch_init(n_tok, 0, 1);
+        batch.n_tokens = n_tok;
+        for (int i = 0; i < n_tok; i++) {
+            batch.token[i] = tokens[i];
+            batch.pos[i] = i;       // sequential positions for causal mask
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = (i == n_tok - 1);  // only need last token's logits
+        }
+        if (llama_decode(lctx, batch) != 0) { fprintf(stderr, "LLM fail\n"); return 1; }
+        llama_batch_free(batch);
         for (int i = 0; i < n_tok; i++) { float * e = llama_get_embeddings_ith(lctx, i); if (e) memcpy(hiddens+i*n_embd, e, n_embd*sizeof(float)); }
-        printf("  %d tokens decoded (LLM alive)\n", n_tok);
+        // Dump raw LM hidden states for Python comparison
+        { FILE * f = fopen("debug_lm_hiddens.bin", "wb");
+          if (f) { fwrite(hiddens, sizeof(float), n_tok * n_embd, f); fclose(f); }
+          float r=0; for(int i=0;i<n_tok*n_embd;i++) r+=hiddens[i]*hiddens[i];
+          printf("  LM hiddens: [%d x %d] RMS=%.4f\n", n_tok, n_embd, sqrtf(r/(n_tok*n_embd))); }
+        printf("  %d tokens decoded (LLM alive)\\n", n_tok);
     } else {
         FILE * ef = fopen(embd_path, "rb");
         if (!ef) { printf("  Extracting token embeddings from GGUF...\n"); if (!extract_embeddings(gguf_path, embd_path)) { fprintf(stderr, "FAILED\n"); return 1; } ef = fopen(embd_path, "rb"); }

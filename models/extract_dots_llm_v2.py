@@ -18,7 +18,7 @@ MISTRAL_CONFIG = {
     "attention.head_count_kv": 2,
     "feed_forward_length": 8960,
     "context_length": 8192,
-    "attention.layer_norm_rms_epsilon": 1e-5,
+    "attention.layer_norm_rms_epsilon": 1e-6,
     "rope.freq_base": 1000000.0,
     "vocab_size": 151672,
     "rope.dimension_count": 128,
