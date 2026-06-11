@@ -28,14 +28,13 @@ inline void manual_linear(float * out, const float * x, const float * w, const f
         for (int i = 0; i < in_feat; i++) s += w[o * in_feat + i] * x[i]; out[o] = s; }
 }
 
-inline void manual_rope(float * q, float * k, int seq_len, int head_dim) {
+inline void manual_rope_theta(float * q, float * k, int seq_len, int head_dim, float rope_theta) {
     int half = head_dim / 2;
     for (int s = 0; s < seq_len; s++) {
         float theta = 1.0f;
-        float ts = powf(10000.0f, -2.0f/(float)head_dim);
+        float ts = powf(rope_theta, -2.0f/(float)head_dim);
         for (int d = 0; d < half; d++) {
             float cs = cosf((float)s*theta), sn = sinf((float)s*theta);
-            // Python: pairs (d, d+half), not (d, d+1)!
             int i1 = s*head_dim + d;
             int i2 = s*head_dim + d + half;
             float q0=q[i1], q1=q[i2], k0=k[i1], k1=k[i2];
@@ -44,6 +43,9 @@ inline void manual_rope(float * q, float * k, int seq_len, int head_dim) {
             theta *= ts;
         }
     }
+}
+inline void manual_rope(float * q, float * k, int seq_len, int head_dim) {
+    manual_rope_theta(q, k, seq_len, head_dim, 10000.0f);
 }
 
 inline void manual_softmax(float * x, int n) {
