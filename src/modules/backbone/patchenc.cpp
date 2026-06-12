@@ -232,5 +232,8 @@ ggml_tensor * patchenc_forward(patch_encoder & enc, ggml_context * ctx,
     ggml_tensor * hc = ggml_reshape_2d(ctx, h3, hidden*2, n_patches); hc = ggml_cont(ctx, hc);
     ggml_tensor * out = ggml_mul_mat(ctx, enc.out_proj_w, hc);
     if (enc.out_proj_b) { ggml_tensor * ob = ggml_reshape_2d(ctx, enc.out_proj_b, 1536, 1); out = ggml_add(ctx, out, ob); }
+    // Compute output graph BEFORE returning (data must be materialized)
+    { ggml_cgraph * cg = ggml_new_graph(ctx); ggml_build_forward_expand(cg, out);
+      ggml_graph_compute_with_ctx(ctx, cg, 1); }
     return out;
 }

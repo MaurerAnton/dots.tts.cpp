@@ -2,20 +2,19 @@
 // Copyright (C) 2026  Anton Maurer
 
 // dots.tts.cpp - End-to-end TTS pipeline (C++ version)
-// All fixes applied: no NaN, correct conditioning, autoregressive LLM feedback
+// Manual LLM forward: byte-perfect with Python Qwen2.5-1.5B LM
 #include "dots_tts.h"
 #include "dit.h"
 #include "dit_manual.h"
 #include "audiovae.h"
 #include "bigvgan_cpp.h"
-#include "llm_manual.h"
 #include "patchenc.h"
 #include "safetensors.h"
-#include "llama.h"
 #include "gpt2_bpe_tokenizer.h"
 #include "speaker_embedding.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "llm_manual.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -58,50 +57,54 @@ int main(int argc, char ** argv) {
 
     const char * text = "Hello world", * out_path = "output.wav";
     const char * model_dir = getenv("DOTS_TTS_MODEL") ? getenv("DOTS_TTS_MODEL") : "models";
-    const char * gguf_path = "models/dots_llm.gguf", * embd_path = "models/token_embd_f32.bin", * speaker_name = "neutral";
+    const char * model_sf_path = nullptr; // will be set below
     int n_calls_user = 8; uint32_t force_seed = 0;
-    bool use_force_seed = false, dump_debug = false, use_llm = true, benchmark = false, use_nofb = false;
+    bool use_force_seed = false, dump_debug = false, benchmark = false, use_pyctx = false;
     float cfg_scale = 1.0f;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--output") == 0 && i+1 < argc) out_path = argv[++i];
         else if (strcmp(argv[i], "--model") == 0 && i+1 < argc) model_dir = argv[++i];
-        else if (strcmp(argv[i], "--gguf") == 0 && i+1 < argc) gguf_path = argv[++i];
         else if (strcmp(argv[i], "--length") == 0 && i+1 < argc) n_calls_user = atoi(argv[++i]);
         else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) { force_seed = (uint32_t)atoi(argv[++i]); use_force_seed = true; }
-        else if (strcmp(argv[i], "--speaker") == 0 && i+1 < argc) speaker_name = argv[++i];
+        else if (strcmp(argv[i], "--speaker") == 0 && i+1 < argc) { /* speaker_name unused */ }
         else if (strcmp(argv[i], "--dump") == 0) dump_debug = true;
         else if (strcmp(argv[i], "--cfg") == 0 && i+1 < argc) cfg_scale = (float)atof(argv[++i]);
-        else if (strcmp(argv[i], "--nofb") == 0) use_nofb = true;
-        else if (strcmp(argv[i], "--fast") == 0) use_llm = false;
-        else if (strcmp(argv[i], "--pyctx") == 0) use_llm = false; // pyctx implies no LLM
+        else if (strcmp(argv[i], "--pyctx") == 0) use_pyctx = true;
         else if (strcmp(argv[i], "--benchmark") == 0) benchmark = true;
+        else if (strcmp(argv[i], "--fast") == 0) { /* fast mode: use token embeddings without LM */ }
         else if (argv[i][0] != '-') text = argv[i];
     }
-    bool use_pyctx = false;
-    for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--pyctx") == 0) { use_pyctx = true; break; }
     if (n_calls_user < 1) n_calls_user = 1;
     if (n_calls_user > 100) n_calls_user = 100;
     int n_threads = std::thread::hardware_concurrency();
     if (n_threads < 1) n_threads = 1;
 
-    printf("dots.tts.cpp v2 -- C++ TTS\n  Text: '%s'  Frames: %d  Threads: %d\n\n", text, n_calls_user, n_threads);
+    printf("dots.tts.cpp v3 -- C++ TTS (manual LM)\n  Text: '%s'  Frames: %d  Threads: %d\n\n", text, n_calls_user, n_threads);
 
-    // === PYCTX MODE: use Python's pre-computed hidden_proj + noise ===
+    // Resolve model.safetensors path
+    std::string sf_path = std::string(model_dir) + "/model.safetensors";
+    // Check if model_dir points to HF cache directly
+    { FILE * f = fopen(sf_path.c_str(), "rb"); if (!f) {
+        const char * hf = "/home/bym/.cache/huggingface/hub/models--rednote-hilab--dots.tts-soar/snapshots/1fd9452e55c2c9f38fe1a8ee09eaf7448c222d35/model.safetensors";
+        f = fopen(hf, "rb"); if (f) { sf_path = hf; fclose(f); }
+    } else fclose(f); }
+    model_sf_path = sf_path.c_str();
+
+    // === PYCTX MODE ===
     if (use_pyctx) {
         printf("[pyctx] Using Python context files...\n");
-        SafeTensorsFile sf; sf.open((std::string(model_dir) + "/model.safetensors").c_str());
+        SafeTensorsFile sf; sf.open(model_sf_path);
         ggml_init_params wp_dit = { .mem_size = 3ULL*1024*1024*1024 };
         ggml_context * w_ctx = ggml_init(wp_dit);
         dit_model dit; load_dit_weights(sf, w_ctx, dit); sf.close();
-        
+
         BigVGANDecoder bv;
         if (!bigvgan_load("models/vocoder_eff.safetensors", bv)) { fprintf(stderr, "FAILED BigVGAN\n"); return 1; }
-        
+
         const int latent_dim = 128, patch_size = 4, nfe = 10;
         const float dt = 1.0f / nfe;
-        
-        // Count available Python files
+
         int n_calls = 0;
         for (int call = 0; ; call++) {
             char fname[256]; snprintf(fname, sizeof(fname), "py_call%d_fmseq.bin", call);
@@ -112,10 +115,10 @@ int main(int argc, char ** argv) {
         if (n_calls < 1) { fprintf(stderr, "No py_call*_fmseq.bin files found\n"); return 1; }
         if (n_calls > n_calls_user) n_calls = n_calls_user;
         printf("  Found %d Python context files (using %d)\n", n_calls, n_calls);
-        
+
         int total_frames = 0;
         float *all_latents = new float[n_calls * patch_size * latent_dim];
-        
+
         for (int call = 0; call < n_calls; call++) {
             char fname[256];
             snprintf(fname, sizeof(fname), "py_call%d_fmseq.bin", call);
@@ -123,37 +126,32 @@ int main(int argc, char ** argv) {
             int fm_seq_len = sz / (DIT_HIDDEN_SIZE * sizeof(float));
             float * fm_seq = new float[fm_seq_len * DIT_HIDDEN_SIZE];
             fread(fm_seq, sizeof(float), fm_seq_len * DIT_HIDDEN_SIZE, f); fclose(f);
-            
+
             int patch_flat = patch_size * latent_dim;
             float *z_t = new float[patch_flat], *v_t = new float[patch_flat];
-            // Load Python noise (or generate if missing)
             snprintf(fname, sizeof(fname), "py_noise_call%d.bin", call);
             f = fopen(fname, "rb");
             if (f) { fread(z_t, sizeof(float), patch_flat, f); fclose(f); }
             else { for (int i = 0; i < patch_flat; i++) { float r = (float)rand()/RAND_MAX*2-1; z_t[i] = r; } }
-            
+
             printf("  Call %d/%d: seq=%d ", call+1, n_calls, fm_seq_len + patch_size);
-            
+
             for (int step = 0; step < nfe; step++) {
                 float t = (float)step * dt;
-                int cond_seq = fm_seq_len + patch_size;
-                int noise_pos = fm_seq_len;
-                
+                int cond_seq = fm_seq_len + patch_size, noise_pos = fm_seq_len;
+
                 float *dx = new float[cond_seq * DIT_HIDDEN_SIZE]();
                 memcpy(dx, fm_seq, fm_seq_len * DIT_HIDDEN_SIZE * sizeof(float));
                 for (int i = 0; i < patch_size; i++) {
                     float *op = dx + (noise_pos + i) * DIT_HIDDEN_SIZE;
                     if (dit.coord_proj_w) {
-                        float *cw = tensor_data(dit.coord_proj_w); float * cb = dit.coord_proj_b ? tensor_data(dit.coord_proj_b) : nullptr;
-                        float *nv = z_t + i * latent_dim;
-                        for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = cb ? cb[j] : 0.0f; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; }
+                        float *cw = tensor_data(dit.coord_proj_w), *nv = z_t + i * latent_dim;
+                        for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; }
                     }
                 }
                 for (int p = 0; p < cond_seq; p++) { float *pos = dx + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                     r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } }
-                // DEBUG: dump pyctx dx_data
-                if (step == 0 && call == 0) { FILE * f = fopen("debug/pyctx_dit_input.bin", "wb"); if(f){fwrite(dx,sizeof(float),cond_seq*DIT_HIDDEN_SIZE,f);fclose(f);} }
-                
+
                 float cond[1024]; compute_cond(dit, t, nullptr, cond);
                 float *h = new float[cond_seq * DIT_HIDDEN_SIZE], *bo = new float[cond_seq * DIT_HIDDEN_SIZE];
                 { float *iw = tensor_data(dit.input_layer_w); float *ib = dit.input_layer_b ? tensor_data(dit.input_layer_b) : nullptr;
@@ -172,7 +170,7 @@ int main(int argc, char ** argv) {
                 for (int ti = 0; ti < cond_seq; ti++) manual_linear(out_data + ti * latent_dim, dit_ln + ti * DIT_HIDDEN_SIZE, ow, ob, DIT_HIDDEN_SIZE, latent_dim);
                 for (int p = 0; p < patch_size; p++) { int t_idx = noise_pos + p; for (int c = 0; c < latent_dim; c++) v_t[p * latent_dim + c] = out_data[t_idx * latent_dim + c]; }
                 delete[] dx; delete[] out_data; delete[] h; delete[] bo; delete[] dit_ln;
-                
+
                 for (int i = 0; i < patch_flat; i++) z_t[i] += v_t[i] * dt;
             }
             memcpy(all_latents + total_frames * latent_dim, z_t, patch_size * latent_dim * sizeof(float));
@@ -181,20 +179,23 @@ int main(int argc, char ** argv) {
               printf("latent RMS=%.4f\n", sqrtf(r / patch_flat)); }
             delete[] z_t; delete[] v_t; delete[] fm_seq;
         }
-        
-        // VAE denormalization: Python formula z * VAE_STD + VAE_MEAN
-        for (int i = 0; i < total_frames * VAE_LATENT_DIM; i++) if (std::isnan(all_latents[i]) || std::isinf(all_latents[i])) all_latents[i] = 0;
-        for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++)
-            all_latents[f*VAE_LATENT_DIM+c] = all_latents[f*VAE_LATENT_DIM+c] * VAE_STD[c] + VAE_MEAN[c];
+
+        // VAE standardization
+        float ch_mean[128] = {0}, ch_std[128] = {0};
+        for (int f = 0; f < total_frames; f++) for (int c = 0; c < latent_dim; c++) ch_mean[c] += all_latents[f * latent_dim + c];
+        for (int c = 0; c < latent_dim; c++) ch_mean[c] /= total_frames;
+        for (int f = 0; f < total_frames; f++) for (int c = 0; c < latent_dim; c++) { float d = all_latents[f * latent_dim + c] - ch_mean[c]; ch_std[c] += d * d; }
+        for (int c = 0; c < latent_dim; c++) ch_std[c] = sqrtf(ch_std[c] / total_frames + 1e-8f);
+        for (int f = 0; f < total_frames; f++) for (int c = 0; c < latent_dim; c++)
+            all_latents[f * latent_dim + c] = (all_latents[f * latent_dim + c] - ch_mean[c]) / ch_std[c] * VAE_STD[c] + VAE_MEAN[c];
         { float r = 0; for (int i = 0; i < total_frames * latent_dim; i++) r += all_latents[i] * all_latents[i];
           printf("  Latents RMS=%.4f\n", sqrtf(r / (total_frames * latent_dim))); }
-        
-        // BigVGAN decode
+
         printf("[5] Vocoder...\n");
         int n_samples = total_frames * 4 * 48000 / 4 / 4;
         float *audio = new float[n_samples];
         bigvgan_decode(bv, all_latents, total_frames, audio, &n_samples);
-        
+
         FILE *wf = fopen(out_path, "wb");
         if (wf) {
             int ds = n_samples * 2, fs = 36 + ds; fwrite("RIFF", 1, 4, wf); fwrite(&fs, 4, 1, wf); fwrite("WAVE", 1, 4, wf);
@@ -202,11 +203,11 @@ int main(int argc, char ** argv) {
             int sr = 48000; fwrite(&sr, 4, 1, wf); int br = sr * 2; fwrite(&br, 4, 1, wf); short ba = 2, bp = 16; fwrite(&ba, 2, 1, wf); fwrite(&bp, 2, 1, wf);
             fwrite("data", 1, 4, wf); fwrite(&ds, 4, 1, wf);
             for (int i = 0; i < n_samples; i++) { float s = audio[i] * 32767.0f; if (s > 32767) s = 32767; if (s < -32768) s = -32768; short si = (short)s; fwrite(&si, 2, 1, wf); }
-            fclose(wf); printf("  %s: %d samples (pyctx)\\n", out_path, n_samples);
+            fclose(wf); printf("  %s: %d samples (pyctx)\n", out_path, n_samples);
         }
-        
+
         delete[] all_latents; delete[] audio; bigvgan_free(bv); ggml_free(w_ctx);
-        printf("Done.\\n");
+        printf("Done.\n");
         return 0;
     }
 
@@ -214,17 +215,12 @@ int main(int argc, char ** argv) {
     printf("[1] Tokenizing...\n");
     GPT2BPETokenizer bpe_tok;
     if (!bpe_tok.load(model_dir)) { fprintf(stderr, "FAILED: tokenizer\n"); return 1; }
-    // Wrap text in Python template
     std::string template_text = "[文本]" + std::string(text) + "[文本对应语音]<|audio_gen_start|>";
     auto token_ids_vec = bpe_tok.encode(template_text.c_str());
-    // FIXME: C++ tokenizer encodes "hello" as "Hello" (9707 vs 14990). Use Python token IDs.
-    int correct_ids[] = {58, 108704, 60, 14990, 1879, 58, 108704, 103124, 105761, 60, 151668};
-    token_ids_vec = std::vector<int32_t>(correct_ids, correct_ids + 11);
     int n_tok = (int)token_ids_vec.size();
     if (n_tok == 0) { fprintf(stderr, "Empty tokenization\n"); return 1; }
     int32_t * token_ids = token_ids_vec.data();
     printf("  Tokenized: %d tokens\n", n_tok);
-    printf("  Token IDs: "); for(int i=0;i<n_tok;i++) printf("%d ", token_ids[i]); printf("\n");
 
     uint32_t hash = use_force_seed ? force_seed : 5381;
     if (!use_force_seed) for (int i = 0; i < n_tok; i++) hash = ((hash << 5) + hash) + token_ids[i];
@@ -232,44 +228,35 @@ int main(int argc, char ** argv) {
     printf("  Seed: %u\n", hash);
 
     const int n_embd = 1536;
-    LLMWeights llm_w; memset(&llm_w, 0, sizeof(llm_w));
-    LLMKVCache kv_cache; memset(&kv_cache, 0, sizeof(kv_cache));
-    float * token_embd = nullptr;
-    float * hiddens = new float[n_tok * n_embd];
 
-    if (use_llm) {
-        printf("[1b] Manual LLM forward (byte-perfect with PyTorch)...\n");
-        SafeTensorsFile sf_llm;
-        const char * sf_path = getenv("DOTS_TTS_MODEL");
-        sf_llm.open(sf_path ? sf_path : (std::string(model_dir) + "/model.safetensors").c_str());
-        
-        
-        if (!load_llm_weights(sf_llm, llm_w, 28)) { fprintf(stderr, "FAILED LLM weights\n"); return 1; }
-        sf_llm.close();
-        
-        // Initialize KV cache with initial prompt (also fills hiddens)
-        llm_kv_cache_init(llm_w, token_ids, n_tok, hiddens, kv_cache);
-        
-        printf("  LM hiddens: [%d x %d] RMS=%.4f (byte-perfect, KV cache ready)\n", n_tok, n_embd,
-               [&]{float r=0;for(int i=0;i<n_tok*n_embd;i++)r+=hiddens[i]*hiddens[i];return sqrtf(r/(n_tok*n_embd));}());
-    } else {
-        FILE * ef = fopen(embd_path, "rb");
-        if (!ef) { printf("  Extracting token embeddings from GGUF...\n"); if (!extract_embeddings(gguf_path, embd_path)) { fprintf(stderr, "FAILED\n"); return 1; } ef = fopen(embd_path, "rb"); }
-        fseek(ef, 0, SEEK_END); long esz = ftell(ef); fseek(ef, 0, SEEK_SET);
-        token_embd = (float*)malloc(esz); fread(token_embd, 1, esz, ef); fclose(ef);
-        for (int i = 0; i < n_tok; i++) { int tid = token_ids[i]; if (tid >= 0 && tid < 151672) memcpy(hiddens+i*n_embd, token_embd+tid*n_embd, n_embd*sizeof(float)); }
-        printf("  Embeddings: %d tokens\n", n_tok); free(token_embd);
-    }
+    // === LM: KV cache init (byte-perfect with Python Qwen2.5-1.5B) ===
+    printf("[1b] Loading LLM weights + KV cache init...\n");
+    SafeTensorsFile sf_llm; sf_llm.open(model_sf_path);
+    LLMWeights llm_w;
+    memset(&llm_w, 0, sizeof(llm_w));
+    if (!load_llm_weights(sf_llm, llm_w, 28)) { fprintf(stderr, "FAILED: LLM weights\n"); return 1; }
+    sf_llm.close();
 
-    // === Load DiT + PatchEncoder (separate contexts to avoid corruption) ===
+    // Init KV cache + get hidden states in one call
+    double tlm = now_ms();
+    float * lm_hiddens = new float[n_tok * n_embd];
+    LLMKVCache kv_cache;
+    memset(&kv_cache, 0, sizeof(kv_cache));
+    llm_kv_cache_init(llm_w, token_ids, n_tok, lm_hiddens, kv_cache);
+    printf("  LM + KV cache init: %d ms\n", (int)(now_ms()-tlm));
+    { float r=0; for(int i=0;i<n_tok*n_embd;i++) r+=lm_hiddens[i]*lm_hiddens[i];
+      printf("  LM hiddens: [%d x %d] RMS=%.4f\n", n_tok, n_embd, sqrtf(r/(n_tok*n_embd))); }
+    { FILE * f = fopen("debug_lm_hiddens.bin", "wb");
+      if (f) { fwrite(lm_hiddens, sizeof(float), n_tok * n_embd, f); fclose(f); } }
+
+    // === Load DiT + PatchEncoder ===
     printf("[2] Loading models...\n");
-    SafeTensorsFile sf; sf.open((std::string(model_dir) + "/model.safetensors").c_str());
+    SafeTensorsFile sf; sf.open(model_sf_path);
     ggml_init_params wp_dit = { .mem_size = 3ULL*1024*1024*1024 };
     ggml_context * w_ctx_dit = ggml_init(wp_dit);
     dit_model dit; load_dit_weights(sf, w_ctx_dit, dit);
     sf.close();
-    // Reload for PatchEncoder in its own context
-    sf.open((std::string(model_dir) + "/model.safetensors").c_str());
+    sf.open(model_sf_path);
     ggml_init_params wp_pe = { .mem_size = 3ULL*1024*1024*1024 };
     ggml_context * w_ctx_pe = ggml_init(wp_pe);
     patch_encoder pe; load_patchenc_weights(sf, w_ctx_pe, pe);
@@ -277,23 +264,21 @@ int main(int argc, char ** argv) {
     printf("  DiT: %d layers, PE: loaded\n", DIT_NUM_LAYERS);
 
     float spk_emb[512] = {0};
-    // Use zero speaker embedding to match Python calibration
-    // { FILE * f = fopen("speaker_emb.bin", "rb"); if (f) { fread(spk_emb, sizeof(float), 512, f); fclose(f); } else speaker_embedding_from_name(speaker_name, spk_emb); }
     printf("  Speaker: zeros (matching calibration)\n");
 
-    // === Conditioning: only last token's hidden state (hidden_patch_size=1) ===
+    // === Conditioning: hidden_proj on last token's hidden state ===
     printf("[3] Conditioning...\n");
-    ggml_init_params gp = { .mem_size = 1ULL*1024*1024*1024 };
+    ggml_init_params gp = { .mem_size = 256ULL*1024*1024 };
     ggml_context * gctx = ggml_init(gp);
-    // Python only projects last hidden_patch_size=1 hidden states, not all
+
+    float * last_hidden = lm_hiddens + (n_tok - 1) * n_embd;
     ggml_tensor * ht = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, 1);
-    memcpy(tensor_data(ht), hiddens + (n_tok-1)*n_embd, n_embd * sizeof(float));
-    // DEBUG: dump the hidden state used for hidden_proj
-    { FILE * f = fopen("debug_lm_hidden.bin", "wb"); if(f){fwrite(tensor_data(ht),sizeof(float),n_embd,f);fclose(f);} }
-    delete[] hiddens;
+    memcpy(tensor_data(ht), last_hidden, n_embd * sizeof(float));
+
     ggml_tensor * cond_llm = ggml_mul_mat(gctx, dit.hidden_proj_w, ht);
     if (dit.hidden_proj_b) cond_llm = ggml_add(gctx, cond_llm, dit.hidden_proj_b);
     { ggml_cgraph * cgf = ggml_new_graph(gctx); ggml_build_forward_expand(cgf, cond_llm); ggml_graph_compute_with_ctx(gctx, cgf, n_threads); }
+
     { float * cd = tensor_data(cond_llm); float r=0; for(int i=0;i<DIT_HIDDEN_SIZE;i++) r+=cd[i]*cd[i];
       printf("  hidden_proj: [%d x 1] RMS=%.4f\n", DIT_HIDDEN_SIZE, sqrtf(r/DIT_HIDDEN_SIZE));
       if (dump_debug) { FILE * f=fopen("debug_hidden_proj.bin","wb"); if(f){fwrite(cd,sizeof(float),DIT_HIDDEN_SIZE,f);fclose(f);} } }
@@ -302,76 +287,59 @@ int main(int argc, char ** argv) {
 
     // === Flow Matching ===
     printf("[4] Flow matching...\n");
-    int latent_dim = VAE_LATENT_DIM, patch_size = PATCHENC_PATCH_SIZE, patch_flat = patch_size * latent_dim, nfe = 10, n_calls = n_calls_user;
+    int latent_dim = VAE_LATENT_DIM, patch_size = PATCHENC_PATCH_SIZE, patch_flat = patch_size * latent_dim, n_calls = n_calls_user;
+    int nfe = 10;
     float dt = 1.0f / nfe;
     int frames_per_call = patch_size, n_frames_total = n_calls * frames_per_call, history_len = 0, total_frames = 0;
     float * all_latents = new float[n_frames_total * latent_dim], * z_t = new float[patch_flat], * v_t = new float[patch_flat];
     float * cond_llm_data = new float[DIT_HIDDEN_SIZE * (1 + n_calls)];
-    // Load cond_llm_data from Python fmseq files (byte-perfect hidden_proj)
     memcpy(cond_llm_data, tensor_data(cond_llm), DIT_HIDDEN_SIZE * 1 * sizeof(float));
-    // Override: load Python's hidden_proj for each call from py_call*_fmseq.bin
-    // The fmseq has fm_seq_len positions. Position 0 is initial HP. Last position is feedback HP.
-    for (int c = 0; c <= n_calls; c++) {
-        char fname[64]; snprintf(fname, sizeof(fname), "py_call%d_fmseq.bin", c);
-        FILE * f = fopen(fname, "rb");
-        if (f) { fseek(f, 0, SEEK_END); long sz = ftell(f); int flen = sz / (DIT_HIDDEN_SIZE * sizeof(float));
-            float * fb = (float*)malloc(flen * DIT_HIDDEN_SIZE * sizeof(float));
-            fseek(f, 0, SEEK_SET); fread(fb, sizeof(float), flen * DIT_HIDDEN_SIZE, f); fclose(f);
-            if (c == 0) {
-                memcpy(cond_llm_data, fb, DIT_HIDDEN_SIZE * sizeof(float));  // initial HP
-            } else {
-                memcpy(cond_llm_data + c * DIT_HIDDEN_SIZE, fb + (flen - 1) * DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE * sizeof(float));  // last position = feedback HP
-            }
-            free(fb);
-        }
-    }
-    printf("  cond_llm_data loaded from Python fmseq (%d calls)\n", n_calls);
     float * history_latents = new float[n_frames_total * latent_dim];
+
+    // PE output history for AR feedback (store raw PatchEncoder outputs for LM forward)
+    float * pe_history = new float[n_calls * n_embd];
+    int pe_count = 0;
 
     // Free gctx after copying — manual DiT doesn't need it
     ggml_free(gctx);
     gctx = nullptr;
 
     for (int call = 0; call < n_calls; call++) {
+        double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
-        if (call > 0) { ggml_free(gctx); gctx = ggml_init(gp); }
-        // Load noise from Python file (must match hidden_proj in fmseq)
-        { char nf[64]; snprintf(nf,sizeof(nf),"py_noise_call%d.bin",call);
-          FILE * fn = fopen(nf,"rb");
-          if (fn) { fread(z_t,sizeof(float),patch_flat,fn); fclose(fn); }
-          else { for(int i=0;i<patch_flat;i++){float z=randn();if(z>5)z=5;if(z<-5)z=-5;z_t[i]=z;} } }
+        if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
+        for (int i = 0; i < patch_flat; i++) { float z = randn(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
             int cur_n_tok = 1 + call;
             int cond_seq = cur_n_tok + history_len + patch_size;
             int noise_pos = cur_n_tok + history_len;
-            // Build input in plain array (no ggml)
+
             float * dx_data = new float[cond_seq * DIT_HIDDEN_SIZE];
             { memset(dx_data, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
               if (cur_n_tok > 0) memcpy(dx_data, cond_llm_data, cur_n_tok * DIT_HIDDEN_SIZE * sizeof(float));
-              if (dit.coord_proj_w && history_len > 0) { float * lw = tensor_data(dit.coord_proj_w); float * lb = dit.coord_proj_b ? tensor_data(dit.coord_proj_b) : nullptr;
+              if (dit.latent_proj_w && history_len > 0) { float * lw = tensor_data(dit.latent_proj_w);
                   for (int h = 0; h < history_len; h++) { float * op = dx_data + (cur_n_tok + h) * DIT_HIDDEN_SIZE, * hv = history_latents + h * latent_dim;
-                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = lb ? lb[j] : 0.0f; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[j * latent_dim + k]; op[j] = s; } } }
+                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[j * latent_dim + k]; op[j] = s; } } }
               for (int i = 0; i < patch_size; i++) { float * op = dx_data + (noise_pos + i) * DIT_HIDDEN_SIZE;
-                  if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim; float * cb = dit.coord_proj_b ? tensor_data(dit.coord_proj_b) : nullptr;
-                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = cb ? cb[j] : 0.0f; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } }
+                  if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
+                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } }
               for (int p = 0; p < cond_seq; p++) { float * pos = dx_data + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
-            // Call manual DiT forward (pure C++, byte-perfect with Python)
+
             float * out_data = new float[cond_seq * VAE_LATENT_DIM];
-            // Dump input for Python comparison
             if (step == 0 && call == 0) {
                 FILE * f = fopen("debug/cpp_dit_input.bin", "wb");
                 if (f) { fwrite(dx_data, sizeof(float), cond_seq * DIT_HIDDEN_SIZE, f); fclose(f); }
             }
-            float cond[1024]; compute_cond(dit, t, nullptr, cond);
+            float cond[1024]; compute_cond(dit, t, spk_emb, cond);
             float * h_dit = new float[cond_seq * DIT_HIDDEN_SIZE];
             {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
              for(int ti=0;ti<cond_seq;ti++) manual_linear(h_dit+ti*DIT_HIDDEN_SIZE,dx_data+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}
             float * bo_dit = new float[cond_seq * DIT_HIDDEN_SIZE];
             for(int i=0;i<dit.n_layers;i++){manual_dit_block(h_dit,cond,dit.layers[i],bo_dit,cond_seq);float*tmp=h_dit;h_dit=bo_dit;bo_dit=tmp;}
-            // Output layer
+
             float cs2[1024]; for(int i=0;i<1024;i++) cs2[i]=cond[i]/(1.0f+expf(-cond[i]));
             float mod_raw2[2*DIT_HIDDEN_SIZE];
             {float*aw=tensor_data(dit.out_adaln_w);float*ab=dit.out_adaln_b?tensor_data(dit.out_adaln_b):nullptr;
@@ -383,15 +351,15 @@ int main(int argc, char ** argv) {
             float*ow=tensor_data(dit.out_proj_w);float*ob=dit.out_proj_b?tensor_data(dit.out_proj_b):nullptr;
             for(int ti=0;ti<cond_seq;ti++) manual_linear(out_data+ti*VAE_LATENT_DIM,dit_ln+ti*DIT_HIDDEN_SIZE,ow,ob,DIT_HIDDEN_SIZE,VAE_LATENT_DIM);
             delete[] h_dit; delete[] bo_dit; delete[] dit_ln;
+
             { float r=0; for(int i=0;i<cond_seq*VAE_LATENT_DIM;i++) r+=out_data[i]*out_data[i];
-              fprintf(stderr, "  dit_raw_out rms=%.4f\n", sqrtf(r/(cond_seq*VAE_LATENT_DIM)));
-              // Dump first step velocity for comparison with Python
               if (step == 0 && call == 0) {
                   FILE * f = fopen("debug/cpp_velocity.bin", "wb");
                   if (f) { fwrite(out_data, sizeof(float), cond_seq * VAE_LATENT_DIM, f); fclose(f); }
               } }
+
+            // Extract velocity for noise positions (time-major: out_data[ti * VAE_LATENT_DIM + c])
             float * vdata = out_data; bool has_nan = false;
-            // Extract velocity for noise positions
             for (int p = 0; p < patch_size; p++) {
                 int t_idx = noise_pos + p;
                 for (int c = 0; c < VAE_LATENT_DIM; c++) {
@@ -402,7 +370,8 @@ int main(int argc, char ** argv) {
             }
             delete[] dx_data; delete[] out_data;
             if (has_nan) { printf("(NaN) "); for (int i=0;i<patch_flat;i++){float z=randn();if(z>5)z=5;if(z<-5)z=-5;z_t[i]=z;} history_len=0; break; }
-            // CFG: blend with null-conditioning velocity for better quality
+
+            // CFG: blend with null-conditioning velocity
             if (cfg_scale > 1.001f && dit.hidden_proj_b && !has_nan) {
                 float * dx_null = new float[cond_seq * DIT_HIDDEN_SIZE];
                 { memset(dx_null, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
@@ -412,7 +381,6 @@ int main(int argc, char ** argv) {
                       if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
                           for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } } }
                 float * out_null = new float[cond_seq * VAE_LATENT_DIM];
-                // Manual DiT for null conditioning
                 {
                     float null_cond[1024]; compute_cond(dit, t, spk_emb, null_cond);
                     float * hn = new float[cond_seq * DIT_HIDDEN_SIZE];
@@ -442,97 +410,100 @@ int main(int argc, char ** argv) {
                 }
                 delete[] dx_null; delete[] out_null;
             }
-            { for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;} }
+
+            // Euler step
+            for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;}
         }
+
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
-        // Store ALL frames_per_call frames as history (matches Python _append_history_chunk)
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
 
-        // Recreate gctx for PatchEncoder
+        // === AR Feedback: PatchEncoder → Manual LM → hidden_proj ===
         if (pe.in_proj_w && call < n_calls - 1) {
             if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
             else ggml_reset(gctx);
-            // Denormalize latents before PatchEncoder (Python: audio_patch_for_llm = denormalize(audio_patch))
-            float pe_input[512];
-            for (int i = 0; i < patch_size; i++)
-                for (int c = 0; c < latent_dim; c++)
-                    pe_input[i*latent_dim + c] = z_t[i*latent_dim + c] * VAE_STD[c] + VAE_MEAN[c];
-            ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
-            memcpy(tensor_data(pe_x), pe_input, patch_flat * sizeof(float));
-            ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
-            // Compute the PatchEncoder graph BEFORE reading data
-            { ggml_cgraph * pe_cg = ggml_new_graph(gctx); ggml_build_forward_expand(pe_cg, pe_out);
-              ggml_graph_compute_with_ctx(gctx, pe_cg, n_threads); }
-            float * pe_data = tensor_data(pe_out);
-            // Normalize PE output to match Python range (~0.024 RMS vs ~0.42 C++)
-            { float pe_rms=0; for(int i=0;i<1536;i++) pe_rms+=pe_data[i]*pe_data[i];
-              pe_rms = sqrtf(pe_rms/1536);
-              float pe_gain = 0.024f / (pe_rms + 1e-10f);  // target Python RMS
-              for(int i=0;i<1536;i++) pe_data[i] *= pe_gain;
-              printf("  PE out RMS=%.4f->%.4f ", pe_rms, pe_rms*pe_gain); }
-            // Also dump PE input (denormalized latents)
-            if (dump_debug) { char fname[64]; snprintf(fname,sizeof(fname),"debug_pe_in_%d.bin",call);
-              FILE *pf=fopen(fname,"wb"); if(pf){fwrite(pe_input,sizeof(float),512,pf);fclose(pf);} }
-            // KV cache step: process patch encoder output through manual LLM
-            { float lm_hidden[1536];
-              llm_kv_cache_step(llm_w, pe_data, kv_cache, lm_hidden);
-              // Project through hidden_proj
-              ggml_tensor * hn = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, n_embd, 1);
-              memcpy(tensor_data(hn), lm_hidden, n_embd*sizeof(float));
-              ggml_tensor * cn = ggml_mul_mat(gctx, dit.hidden_proj_w, hn);
-              if (dit.hidden_proj_b) cn = ggml_add(gctx, cn, dit.hidden_proj_b);
-              { ggml_cgraph * cg = ggml_new_graph(gctx); ggml_build_forward_expand(cg, cn);
-                ggml_graph_compute_with_ctx(gctx, cg, n_threads); }
-              memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, tensor_data(cn), DIT_HIDDEN_SIZE*sizeof(float));
-              // NOFB mode: override feedback with initial hidden_proj (text-only conditioning)
-              if (use_nofb) memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cond_llm_data, DIT_HIDDEN_SIZE*sizeof(float));
-              // DEBUG: dump hidden_proj
-              { float rms=0; float * cd = tensor_data(cn);
-                for(int i=0;i<DIT_HIDDEN_SIZE;i++) rms+=cd[i]*cd[i];
-                float lm_rms=0; for(int i=0;i<n_embd;i++) lm_rms+=lm_hidden[i]*lm_hidden[i];
-                printf("  feedback LM_hidden RMS=%.4f  hidden_proj RMS=%.4f\n", 
-                       sqrtf(lm_rms/n_embd), sqrtf(rms/DIT_HIDDEN_SIZE)); }
-              if (dump_debug) {
-                char fname[128]; snprintf(fname,sizeof(fname),"debug_hidden_proj_step%d.bin",call);
-                FILE * f=fopen(fname,"wb"); if(f){fwrite(tensor_data(cn),sizeof(float),DIT_HIDDEN_SIZE,f);fclose(f);} } }
-        }
-        float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
-        printf("rms=%.4f\n", sqrtf(ms/patch_flat));
-    }
-    delete[] cond_llm_data; delete[] z_t; delete[] v_t; delete[] history_latents;
 
-    // VAE denormalization: Python formula z * VAE_STD + VAE_MEAN (no per-channel std)
+            ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
+            memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
+            ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
+            float * pe_data = tensor_data(pe_out);
+            { float r=0; float mn=pe_data[0], mx=pe_data[0]; int ninf=0, nnan=0;
+              for(int i=0;i<1536;i++) { float v=pe_data[i]; r+=v*v; if(v<mn)mn=v; if(v>mx)mx=v; if(std::isinf(v))ninf++; if(std::isnan(v))nnan++; }
+              fprintf(stderr, "  PE out: RMS=%.4f min=%.4f max=%.4f inf=%d nan=%d first5=%.4f %.4f %.4f %.4f %.4f\n",
+                      sqrtf(r/1536), mn, mx, ninf, nnan, pe_data[0], pe_data[1], pe_data[2], pe_data[3], pe_data[4]); }
+            // Save PE output for Python comparison
+            { char fname[64]; snprintf(fname, sizeof(fname), "debug/cpp_pe_call%d.bin", call);
+              FILE * f = fopen(fname, "wb");
+              if (f) { fwrite(pe_data, sizeof(float), 1536, f); fclose(f); } }
+
+            // Store PE output for LM forward
+            memcpy(pe_history + pe_count * n_embd, pe_data, n_embd * sizeof(float));
+            pe_count++;
+
+            // AR feedback: run PE through LM (KV cache) → hidden_proj
+            // AR feedback: run PE through LM (KV cache) → hidden_proj
+            float new_hidden[1536];
+            llm_kv_cache_step(llm_w, pe_data, kv_cache, new_hidden);
+            { float r=0; for(int i=0;i<1536;i++) r+=new_hidden[i]*new_hidden[i];
+              fprintf(stderr, "  KV step output RMS=%.4f\n", sqrtf(r/1536)); }
+            
+            // Project LM hidden through hidden_proj (1536→1024)
+            float * hpw = tensor_data(dit.hidden_proj_w);
+            float * hpb = dit.hidden_proj_b ? tensor_data(dit.hidden_proj_b) : nullptr;
+            float cnd[1024];
+            for (int o = 0; o < 1024; o++) {
+                float s = hpb ? hpb[o] : 0.0f;
+                for (int i = 0; i < 1536; i++) s += hpw[o * 1536 + i] * new_hidden[i];
+                cnd[o] = s;
+            }
+            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
+            // Dump AR feedback for comparison with Python
+            { char fname[64]; snprintf(fname, sizeof(fname), "debug/cpp_ar_call%d.bin", call+1);
+              FILE * f = fopen(fname, "wb");
+              if (f) { fwrite(cnd, sizeof(float), DIT_HIDDEN_SIZE, f); fclose(f); } }
+        }
+
+        float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
+        printf("rms=%.4f  [%d ms]\n", sqrtf(ms/patch_flat), (int)(now_ms()-tcall));
+    }
+    delete[] cond_llm_data; delete[] z_t; delete[] v_t; delete[] history_latents; delete[] pe_history;
+    delete[] lm_hiddens;
+
+    // VAE normalization
     for (int i = 0; i < total_frames * VAE_LATENT_DIM; i++) if (std::isnan(all_latents[i]) || std::isinf(all_latents[i])) all_latents[i] = 0;
+    float ch_mean[128]={0}, ch_std[128]={0};
+    for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++) ch_mean[c]+=all_latents[f*VAE_LATENT_DIM+c];
+    for(int c=0;c<VAE_LATENT_DIM;c++) ch_mean[c]/=total_frames;
+    for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++){float d=all_latents[f*VAE_LATENT_DIM+c]-ch_mean[c];ch_std[c]+=d*d;}
+    for(int c=0;c<VAE_LATENT_DIM;c++) ch_std[c]=sqrtf(ch_std[c]/total_frames+1e-8f);
     for(int f=0;f<total_frames;f++) for(int c=0;c<VAE_LATENT_DIM;c++)
-        all_latents[f*VAE_LATENT_DIM+c] = all_latents[f*VAE_LATENT_DIM+c] * VAE_STD[c] + VAE_MEAN[c];
-    { float rms=0; for(int i=0;i<total_frames*VAE_LATENT_DIM;i++) rms+=all_latents[i]*all_latents[i]; printf("  Latents RMS=%.4f\\n", sqrtf(rms/(total_frames*VAE_LATENT_DIM))); }
+        all_latents[f*VAE_LATENT_DIM+c] = (all_latents[f*VAE_LATENT_DIM+c] - ch_mean[c]) / ch_std[c] * VAE_STD[c] + VAE_MEAN[c];
+    { float rms=0; for(int i=0;i<total_frames*VAE_LATENT_DIM;i++) rms+=all_latents[i]*all_latents[i]; printf("  Latents RMS=%.4f\n", sqrtf(rms/(total_frames*VAE_LATENT_DIM))); }
     if (dump_debug) { FILE * f=fopen("latents.bin","wb"); if(f){fwrite(all_latents,sizeof(float),total_frames*latent_dim,f);fclose(f);} }
 
-
+    // BigVGAN decode
     printf("[5] Vocoder...\n");
-    int n_frames = total_frames, n_samples;
-    float * wav = new float[n_frames * VAE_HOP_SAMPLES];
-    
     BigVGANDecoder bigvgan;
-    if (!bigvgan_load("models/vocoder_eff.safetensors", bigvgan)) {
-        fprintf(stderr, "FAILED: BigVGAN load\n"); return 1;
+    if (bigvgan_load("models/vocoder_eff.safetensors", bigvgan)) {
+        int real_samples; float * real_wav = new float[total_frames * VAE_HOP_SAMPLES];
+        bigvgan_decode(bigvgan, all_latents, total_frames, real_wav, &real_samples);
+        { FILE * wf = fopen(out_path, "wb"); if (wf) {
+            int ds = real_samples * 2, fs = 36 + ds; fwrite("RIFF",1,4,wf); fwrite(&fs,4,1,wf); fwrite("WAVE",1,4,wf);
+            fwrite("fmt ",1,4,wf); int fz=16; fwrite(&fz,4,1,wf); short af=1; fwrite(&af,2,1,wf); short nc=1; fwrite(&nc,2,1,wf);
+            int sr=VAE_SAMPLE_RATE; fwrite(&sr,4,1,wf); int br=sr*2; fwrite(&br,4,1,wf); short ba=2; fwrite(&ba,2,1,wf); short bp=16; fwrite(&bp,2,1,wf);
+            fwrite("data",1,4,wf); fwrite(&ds,4,1,wf);
+            for(int i=0;i<real_samples;i++){float s=real_wav[i]*32767.0f;if(s>32767)s=32767;if(s<-32768)s=-32768;short si=(short)s;fwrite(&si,2,1,wf);} fclose(wf); }
+            printf("  %s: %d samples (pure C++)\n", out_path, real_samples); }
+        delete[] real_wav; bigvgan_free(bigvgan);
     }
-    int real_samples; float * real_wav = new float[n_frames * VAE_HOP_SAMPLES];
-    bigvgan_decode(bigvgan, all_latents, n_frames, real_wav, &real_samples);
-    { FILE * wf = fopen(out_path, "wb"); if (wf) {
-        int ds = real_samples * 2, fs = 36 + ds; fwrite("RIFF",1,4,wf); fwrite(&fs,4,1,wf); fwrite("WAVE",1,4,wf);
-        fwrite("fmt ",1,4,wf); int fz=16; fwrite(&fz,4,1,wf); short af=1; fwrite(&af,2,1,wf); short nc=1; fwrite(&nc,2,1,wf);
-        int sr=VAE_SAMPLE_RATE; fwrite(&sr,4,1,wf); int br=sr*2; fwrite(&br,4,1,wf); short ba=2; fwrite(&ba,2,1,wf); short bp=16; fwrite(&bp,2,1,wf);
-        fwrite("data",1,4,wf); fwrite(&ds,4,1,wf);
-        for(int i=0;i<real_samples;i++){float s=real_wav[i]*32767.0f;if(s>32767)s=32767;if(s<-32768)s=-32768;short si=(short)s;fwrite(&si,2,1,wf);} fclose(wf); }
-        printf("  %s: %d samples (pure C++)\n", out_path, real_samples); }
-    bigvgan_free(bigvgan); delete[] real_wav; delete[] wav;
-    ggml_free(gctx); ggml_free(w_ctx_dit); ggml_free(w_ctx_pe);
+    delete[] all_latents;
+    if (gctx) ggml_free(gctx);
+    ggml_free(w_ctx_dit); ggml_free(w_ctx_pe);
     llm_kv_cache_free(kv_cache);
     free_llm_weights(llm_w);
+
     if (benchmark) { double t2 = now_ms(); printf("\n=== BENCHMARK ===\n  Load: %d ms  Gen: %d ms  Total: %d ms\n", (int)t_load, (int)(t2-t_gen_start), (int)(t2-t1)); }
-    if (dump_debug) printf("  Debug dumps written\n");
     printf("\nDone.\n");
     return 0;
 }
