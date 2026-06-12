@@ -17,7 +17,6 @@
 #include "llm_manual.h"
 #include "mt19937.h"
 #include "noise_data.h"
-#include "ar_data.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -329,9 +328,16 @@ int main(int argc, char ** argv) {
             float * dx_data = new float[cond_seq * DIT_HIDDEN_SIZE];
             { memset(dx_data, 0, cond_seq * DIT_HIDDEN_SIZE * sizeof(float));
               if (cur_n_tok > 0) memcpy(dx_data, cond_llm_data, cur_n_tok * DIT_HIDDEN_SIZE * sizeof(float));
-              if (dit.latent_proj_w && history_len > 0) { float * lw = tensor_data(dit.latent_proj_w);
+              if (dit.latent_proj_w && history_len > 0) {
                   for (int h = 0; h < history_len; h++) { float * op = dx_data + (cur_n_tok + h) * DIT_HIDDEN_SIZE, * hv = history_latents + h * latent_dim;
-                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[j * latent_dim + k]; op[j] = s; } } }
+                      ggml_tensor * hv_t = ggml_new_tensor_2d(w_ctx_dit, GGML_TYPE_F32, latent_dim, 1);
+                      memcpy(tensor_data(hv_t), hv, latent_dim * sizeof(float));
+                      ggml_tensor * lp = ggml_mul_mat(w_ctx_dit, dit.latent_proj_w, hv_t);
+                      if (dit.latent_proj_b) lp = ggml_add(w_ctx_dit, lp, dit.latent_proj_b);
+                      { ggml_cgraph * cg = ggml_new_graph(w_ctx_dit); ggml_build_forward_expand(cg, lp);
+                        ggml_graph_compute_with_ctx(w_ctx_dit, cg, 1); }
+                      memcpy(op, tensor_data(lp), DIT_HIDDEN_SIZE * sizeof(float));
+                  } }
               for (int i = 0; i < patch_size; i++) { float * op = dx_data + (noise_pos + i) * DIT_HIDDEN_SIZE;
                   if (dit.coord_proj_w) {
                       ggml_tensor * nv_t = ggml_new_tensor_2d(w_ctx_dit, GGML_TYPE_F32, latent_dim, 1);
@@ -442,9 +448,25 @@ int main(int argc, char ** argv) {
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
-        // AR feedback: use pre-computed values (matching Python output)
-        if (call < n_calls - 1 && call < 6) {
-            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, AR_FEEDBACK[call], DIT_HIDDEN_SIZE*sizeof(float));
+        // AR feedback: PatchEncoder → KV Cache → hidden_proj (pure C++)
+        if (pe.in_proj_w && call < n_calls - 1) {
+            if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
+            else ggml_reset(gctx);
+            ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
+            memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
+            ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
+            float * pe_data = tensor_data(pe_out);
+            float new_hidden[1536];
+            llm_kv_cache_step(llm_w, pe_data, kv_cache, new_hidden);
+            float * hpw = tensor_data(dit.hidden_proj_w);
+            float * hpb = dit.hidden_proj_b ? tensor_data(dit.hidden_proj_b) : nullptr;
+            float cnd[1024];
+            for (int o = 0; o < 1024; o++) {
+                float s = hpb ? hpb[o] : 0.0f;
+                for (int i = 0; i < 1536; i++) s += hpw[o * 1536 + i] * new_hidden[i];
+                cnd[o] = s;
+            }
+            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
         }
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
         printf("rms=%.4f  [%d ms]\n", sqrtf(ms/patch_flat), (int)(now_ms()-tcall));
