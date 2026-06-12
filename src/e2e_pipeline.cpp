@@ -16,6 +16,7 @@
 #include "ggml-cpu.h"
 #include "llm_manual.h"
 #include "mt19937.h"
+#include "noise_data.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -130,10 +131,8 @@ int main(int argc, char ** argv) {
 
             int patch_flat = patch_size * latent_dim;
             float *z_t = new float[patch_flat], *v_t = new float[patch_flat];
-            snprintf(fname, sizeof(fname), "py_noise_call%d.bin", call);
-            f = fopen(fname, "rb");
-            if (f) { fread(z_t, sizeof(float), patch_flat, f); fclose(f); }
-            else { for (int i = 0; i < patch_flat; i++) { float r = (float)rand()/RAND_MAX*2-1; z_t[i] = r; } }
+            // Use const noise array (matching Python torch.manual_seed(42))
+            memcpy(z_t, NOISE[call], patch_flat * sizeof(float));
 
             printf("  Call %d/%d: seq=%d ", call+1, n_calls, fm_seq_len + patch_size);
 
@@ -146,8 +145,13 @@ int main(int argc, char ** argv) {
                 for (int i = 0; i < patch_size; i++) {
                     float *op = dx + (noise_pos + i) * DIT_HIDDEN_SIZE;
                     if (dit.coord_proj_w) {
-                        float *cw = tensor_data(dit.coord_proj_w), *nv = z_t + i * latent_dim;
-                        for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; }
+                        ggml_tensor * nv_t = ggml_new_tensor_2d(w_ctx, GGML_TYPE_F32, latent_dim, 1);
+                        memcpy(tensor_data(nv_t), z_t + i * latent_dim, latent_dim * sizeof(float));
+                        ggml_tensor * proj = ggml_mul_mat(w_ctx, dit.coord_proj_w, nv_t);
+                        if (dit.coord_proj_b) proj = ggml_add(w_ctx, proj, dit.coord_proj_b);
+                        { ggml_cgraph * cg = ggml_new_graph(w_ctx); ggml_build_forward_expand(cg, proj);
+                          ggml_graph_compute_with_ctx(w_ctx, cg, 1); }
+                        memcpy(op, tensor_data(proj), DIT_HIDDEN_SIZE * sizeof(float));
                     }
                 }
                 for (int p = 0; p < cond_seq; p++) { float *pos = dx + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
@@ -312,7 +316,8 @@ int main(int argc, char ** argv) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
-        for (int i = 0; i < patch_flat; i++) { float z = mt.normal(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
+        if (call < 7) memcpy(z_t, NOISE[call], patch_flat * sizeof(float));
+        else for (int i = 0; i < patch_flat; i++) { float z = mt.normal(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
@@ -327,8 +332,28 @@ int main(int argc, char ** argv) {
                   for (int h = 0; h < history_len; h++) { float * op = dx_data + (cur_n_tok + h) * DIT_HIDDEN_SIZE, * hv = history_latents + h * latent_dim;
                       for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += hv[k] * lw[j * latent_dim + k]; op[j] = s; } } }
               for (int i = 0; i < patch_size; i++) { float * op = dx_data + (noise_pos + i) * DIT_HIDDEN_SIZE;
-                  if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
-                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } }
+                  if (dit.coord_proj_w) {
+                      // DEBUG: print raw weight
+                      if (call == 0 && step == 0 && i == 0) {
+                          float * cw = tensor_data(dit.coord_proj_w);
+                          fprintf(stderr, "COORD_WEIGHT[0..4]=%.6f %.6f %.6f %.6f %.6f ne=%zu %zu\n",
+                                  cw[0],cw[1],cw[2],cw[3],cw[4], dit.coord_proj_w->ne[0], dit.coord_proj_w->ne[1]);
+                      }
+                      ggml_tensor * nv_t = ggml_new_tensor_2d(w_ctx_dit, GGML_TYPE_F32, latent_dim, 1);
+                      memcpy(tensor_data(nv_t), z_t + i * latent_dim, latent_dim * sizeof(float));
+                      if (call == 0 && step == 0 && i == 0) {
+                          fprintf(stderr, "NOISE[0..4]=%.6f %.6f %.6f %.6f %.6f\n", z_t[0],z_t[1],z_t[2],z_t[3],z_t[4]);
+                      }
+                      ggml_tensor * proj = ggml_mul_mat(w_ctx_dit, dit.coord_proj_w, nv_t);
+                      if (dit.coord_proj_b) proj = ggml_add(w_ctx_dit, proj, dit.coord_proj_b);
+                      { ggml_cgraph * cg = ggml_new_graph(w_ctx_dit); ggml_build_forward_expand(cg, proj);
+                        ggml_graph_compute_with_ctx(w_ctx_dit, cg, 1); }
+                      if (call == 0 && step == 0 && i == 0) {
+                          float * pr = tensor_data(proj);
+                          fprintf(stderr, "COORD_OUT[0..4]=%.6f %.6f %.6f %.6f %.6f\n", pr[0],pr[1],pr[2],pr[3],pr[4]);
+                      }
+                      memcpy(op, tensor_data(proj), DIT_HIDDEN_SIZE * sizeof(float));
+                  } }
               for (int p = 0; p < cond_seq; p++) { float * pos = dx_data + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
 
@@ -382,8 +407,15 @@ int main(int argc, char ** argv) {
                   float * bd = (float*)((char*)dit.hidden_proj_b->data + dit.hidden_proj_b->view_offs);
                   for (int p = 0; p < cur_n_tok + history_len; p++) memcpy(dx_null + p * DIT_HIDDEN_SIZE, bd, DIT_HIDDEN_SIZE * sizeof(float));
                   for (int i = 0; i < patch_size; i++) { float * op = dx_null + (noise_pos + i) * DIT_HIDDEN_SIZE;
-                      if (dit.coord_proj_w) { float * cw = tensor_data(dit.coord_proj_w), * nv = z_t + i * latent_dim;
-                          for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } } }
+                      if (dit.coord_proj_w) {
+                          ggml_tensor * nv_t = ggml_new_tensor_2d(w_ctx_dit, GGML_TYPE_F32, latent_dim, 1);
+                          memcpy(tensor_data(nv_t), z_t + i * latent_dim, latent_dim * sizeof(float));
+                          ggml_tensor * proj = ggml_mul_mat(w_ctx_dit, dit.coord_proj_w, nv_t);
+                          if (dit.coord_proj_b) proj = ggml_add(w_ctx_dit, proj, dit.coord_proj_b);
+                          { ggml_cgraph * cg = ggml_new_graph(w_ctx_dit); ggml_build_forward_expand(cg, proj);
+                            ggml_graph_compute_with_ctx(w_ctx_dit, cg, 1); }
+                          memcpy(op, tensor_data(proj), DIT_HIDDEN_SIZE * sizeof(float));
+                      } } }
                 float * out_null = new float[cond_seq * VAE_LATENT_DIM];
                 {
                     float null_cond[1024]; compute_cond(dit, t, nullptr, null_cond);
@@ -417,6 +449,12 @@ int main(int argc, char ** argv) {
 
             // Euler step
             for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;}
+            // Dump latents after each Euler step (call 0)
+            if (call == 0) {
+                char fname[64]; snprintf(fname, sizeof(fname), "debug/cpp_lat_step%d.bin", step);
+                FILE * f = fopen(fname, "wb");
+                if (f) { fwrite(z_t, sizeof(float), patch_flat, f); fclose(f); }
+            }
         }
 
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
