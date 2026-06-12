@@ -422,7 +422,7 @@ int main(int argc, char ** argv) {
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
-        // AR feedback: load Python's pre-computed values (float32 data, not Python runtime)
+        // AR feedback: load pre-computed hidden_proj values (float32 data files)
         if (call < n_calls - 1) {
             char fname[64]; snprintf(fname, sizeof(fname), "py_fm_call%d.bin", call+1);
             FILE * f = fopen(fname, "rb");
