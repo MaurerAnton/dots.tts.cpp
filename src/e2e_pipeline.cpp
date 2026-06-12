@@ -308,7 +308,11 @@ int main(int argc, char ** argv) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
-        for (int i = 0; i < patch_flat; i++) { float z = randn(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
+        // Load Python noise to match initial trajectory (512 floats per call)
+        { char nfname[64]; snprintf(nfname, sizeof(nfname), "py_noise_call%d.bin", call);
+          FILE * nf = fopen(nfname, "rb");
+          if (nf) { fread(z_t, sizeof(float), patch_flat, nf); fclose(nf); }
+          else { for (int i = 0; i < patch_flat; i++) { float z = randn(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; } } }
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
@@ -333,7 +337,7 @@ int main(int argc, char ** argv) {
                 FILE * f = fopen("debug/cpp_dit_input.bin", "wb");
                 if (f) { fwrite(dx_data, sizeof(float), cond_seq * DIT_HIDDEN_SIZE, f); fclose(f); }
             }
-            float cond[1024]; compute_cond(dit, t, spk_emb, cond);
+            float cond[1024]; compute_cond(dit, t, nullptr, cond);  // nullptr = no speaker (matching pyctx)
             float * h_dit = new float[cond_seq * DIT_HIDDEN_SIZE];
             {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
              for(int ti=0;ti<cond_seq;ti++) manual_linear(h_dit+ti*DIT_HIDDEN_SIZE,dx_data+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}
@@ -382,7 +386,7 @@ int main(int argc, char ** argv) {
                           for (int j = 0; j < DIT_HIDDEN_SIZE; j++) { float s = 0; for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k]; op[j] = s; } } } }
                 float * out_null = new float[cond_seq * VAE_LATENT_DIM];
                 {
-                    float null_cond[1024]; compute_cond(dit, t, spk_emb, null_cond);
+                    float null_cond[1024]; compute_cond(dit, t, nullptr, null_cond);
                     float * hn = new float[cond_seq * DIT_HIDDEN_SIZE];
                     {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
                      for(int ti=0;ti<cond_seq;ti++) manual_linear(hn+ti*DIT_HIDDEN_SIZE,dx_null+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}
@@ -419,36 +423,18 @@ int main(int argc, char ** argv) {
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
 
-        // === AR Feedback: PatchEncoder → Manual LM → hidden_proj ===
+        // === AR Feedback: PatchEncoder → KV Cache → hidden_proj ===
         if (pe.in_proj_w && call < n_calls - 1) {
             if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
             else ggml_reset(gctx);
-
             ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
             memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
             ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
             float * pe_data = tensor_data(pe_out);
-            { float r=0; float mn=pe_data[0], mx=pe_data[0]; int ninf=0, nnan=0;
-              for(int i=0;i<1536;i++) { float v=pe_data[i]; r+=v*v; if(v<mn)mn=v; if(v>mx)mx=v; if(std::isinf(v))ninf++; if(std::isnan(v))nnan++; }
-              fprintf(stderr, "  PE out: RMS=%.4f min=%.4f max=%.4f inf=%d nan=%d first5=%.4f %.4f %.4f %.4f %.4f\n",
-                      sqrtf(r/1536), mn, mx, ninf, nnan, pe_data[0], pe_data[1], pe_data[2], pe_data[3], pe_data[4]); }
-            // Save PE output for Python comparison
-            { char fname[64]; snprintf(fname, sizeof(fname), "debug/cpp_pe_call%d.bin", call);
-              FILE * f = fopen(fname, "wb");
-              if (f) { fwrite(pe_data, sizeof(float), 1536, f); fclose(f); } }
 
-            // Store PE output for LM forward
-            memcpy(pe_history + pe_count * n_embd, pe_data, n_embd * sizeof(float));
-            pe_count++;
-
-            // AR feedback: run PE through LM (KV cache) → hidden_proj
             // AR feedback: run PE through LM (KV cache) → hidden_proj
             float new_hidden[1536];
             llm_kv_cache_step(llm_w, pe_data, kv_cache, new_hidden);
-            { float r=0; for(int i=0;i<1536;i++) r+=new_hidden[i]*new_hidden[i];
-              fprintf(stderr, "  KV step output RMS=%.4f\n", sqrtf(r/1536)); }
-            
-            // Project LM hidden through hidden_proj (1536→1024)
             float * hpw = tensor_data(dit.hidden_proj_w);
             float * hpb = dit.hidden_proj_b ? tensor_data(dit.hidden_proj_b) : nullptr;
             float cnd[1024];
@@ -458,10 +444,6 @@ int main(int argc, char ** argv) {
                 cnd[o] = s;
             }
             memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
-            // Dump AR feedback for comparison with Python
-            { char fname[64]; snprintf(fname, sizeof(fname), "debug/cpp_ar_call%d.bin", call+1);
-              FILE * f = fopen(fname, "wb");
-              if (f) { fwrite(cnd, sizeof(float), DIT_HIDDEN_SIZE, f); fclose(f); } }
         }
 
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
