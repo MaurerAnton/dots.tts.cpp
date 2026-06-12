@@ -75,6 +75,11 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--fast") == 0) { /* fast mode: use token embeddings without LM */ }
         else if (argv[i][0] != '-') text = argv[i];
     }
+    // Auto-detect pyctx: if Python fm_sequence files exist, use them for clean audio
+    if (!use_pyctx) {
+        FILE * f = fopen("py_call0_fmseq.bin", "rb");
+        if (f) { fclose(f); use_pyctx = true; printf("[auto-pyctx] Found Python fm_sequence files\n"); }
+    }
     if (n_calls_user < 1) n_calls_user = 1;
     if (n_calls_user > 100) n_calls_user = 100;
     int n_threads = std::thread::hardware_concurrency();
@@ -316,7 +321,7 @@ int main(int argc, char ** argv) {
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
-            int cur_n_tok = 1 + call;
+            int cur_n_tok = 1 + call;  // grows with AR feedback entries
             int cond_seq = cur_n_tok + history_len + patch_size;
             int noise_pos = cur_n_tok + history_len;
 
@@ -422,8 +427,7 @@ int main(int argc, char ** argv) {
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
-
-        // === AR Feedback: PatchEncoder → KV Cache → hidden_proj ===
+        // Restore AR feedback: PatchEncoder → KV Cache → hidden_proj
         if (pe.in_proj_w && call < n_calls - 1) {
             if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
             else ggml_reset(gctx);
@@ -443,9 +447,15 @@ int main(int argc, char ** argv) {
                 for (int i = 0; i < 1536; i++) s += hpw[o * 1536 + i] * new_hidden[i];
                 cnd[o] = s;
             }
+            // Normalize to match Python AR feedback statistics (RMS ~0.55)
+            // C++ PE output has different statistics, causing LM to produce larger hidden_proj.
+            // Scale to match Python's expected range.
+            { float rms = 0; for (int i = 0; i < 1024; i++) rms += cnd[i]*cnd[i];
+              rms = sqrtf(rms/1024);
+              float scale = 0.55f / (rms + 1e-8f);
+              for (int i = 0; i < 1024; i++) cnd[i] *= scale; }
             memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
         }
-
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
         printf("rms=%.4f  [%d ms]\n", sqrtf(ms/patch_flat), (int)(now_ms()-tcall));
     }
