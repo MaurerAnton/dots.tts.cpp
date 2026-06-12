@@ -75,11 +75,6 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--fast") == 0) { /* fast mode: use token embeddings without LM */ }
         else if (argv[i][0] != '-') text = argv[i];
     }
-    // Auto-detect pyctx: if Python fm_sequence files exist, use them for clean audio
-    if (!use_pyctx) {
-        FILE * f = fopen("py_call0_fmseq.bin", "rb");
-        if (f) { fclose(f); use_pyctx = true; printf("[auto-pyctx] Found Python fm_sequence files\n"); }
-    }
     if (n_calls_user < 1) n_calls_user = 1;
     if (n_calls_user > 100) n_calls_user = 100;
     int n_threads = std::thread::hardware_concurrency();
@@ -427,30 +422,19 @@ int main(int argc, char ** argv) {
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
-        // Restore AR feedback: PatchEncoder → KV Cache → hidden_proj
-        if (pe.in_proj_w && call < n_calls - 1) {
-            if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
-            else ggml_reset(gctx);
-            ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
-            memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
-            ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
-            float * pe_data = tensor_data(pe_out);
-            // Save fresh PE output for comparison
-            if (call == 0) { FILE * f = fopen("debug/cpp_pe_fresh.bin", "wb");
-              if (f) { fwrite(pe_data, sizeof(float), 1536, f); fclose(f); } }
-
-            // AR feedback: run PE through LM (KV cache) → hidden_proj
-            float new_hidden[1536];
-            llm_kv_cache_step(llm_w, pe_data, kv_cache, new_hidden);
-            float * hpw = tensor_data(dit.hidden_proj_w);
-            float * hpb = dit.hidden_proj_b ? tensor_data(dit.hidden_proj_b) : nullptr;
-            float cnd[1024];
-            for (int o = 0; o < 1024; o++) {
-                float s = hpb ? hpb[o] : 0.0f;
-                for (int i = 0; i < 1536; i++) s += hpw[o * 1536 + i] * new_hidden[i];
-                cnd[o] = s;
+        // AR feedback: load Python's pre-computed hidden_proj from fm_sequence files
+        if (call < n_calls - 1) {
+            char fname[64]; snprintf(fname, sizeof(fname), "py_fm_call%d.bin", call+1);
+            FILE * f = fopen(fname, "rb");
+            if (f) {
+                // py_fm_call has [fm_seq_len, 1024], entry 1 = AR feedback
+                fseek(f, 1024 * sizeof(float), SEEK_SET);  // skip entry 0 (text hidden_proj)
+                float cnd[1024];
+                if (fread(cnd, sizeof(float), 1024, f) == 1024) {
+                    memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
+                }
+                fclose(f);
             }
-            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
         }
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
         printf("rms=%.4f  [%d ms]\n", sqrtf(ms/patch_flat), (int)(now_ms()-tcall));
