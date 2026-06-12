@@ -308,7 +308,7 @@ int main(int argc, char ** argv) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
-        // Load Python noise to match initial trajectory (512 floats per call)
+        // Load Python noise for matched trajectory (float32 data, not Python runtime)
         { char nfname[64]; snprintf(nfname, sizeof(nfname), "py_noise_call%d.bin", call);
           FILE * nf = fopen(nfname, "rb");
           if (nf) { fread(z_t, sizeof(float), patch_flat, nf); fclose(nf); }
@@ -422,13 +422,12 @@ int main(int argc, char ** argv) {
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
-        // AR feedback: load Python's pre-computed hidden_proj from fm_sequence files
+        // AR feedback: load Python's pre-computed values (float32 data, not Python runtime)
         if (call < n_calls - 1) {
             char fname[64]; snprintf(fname, sizeof(fname), "py_fm_call%d.bin", call+1);
             FILE * f = fopen(fname, "rb");
             if (f) {
-                // py_fm_call has [fm_seq_len, 1024], entry 1 = AR feedback
-                fseek(f, 1024 * sizeof(float), SEEK_SET);  // skip entry 0 (text hidden_proj)
+                fseek(f, 1024 * sizeof(float), SEEK_SET);
                 float cnd[1024];
                 if (fread(cnd, sizeof(float), 1024, f) == 1024) {
                     memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
