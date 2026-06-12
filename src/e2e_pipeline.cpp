@@ -435,6 +435,9 @@ int main(int argc, char ** argv) {
             memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
             ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
             float * pe_data = tensor_data(pe_out);
+            // Save fresh PE output for comparison
+            if (call == 0) { FILE * f = fopen("debug/cpp_pe_fresh.bin", "wb");
+              if (f) { fwrite(pe_data, sizeof(float), 1536, f); fclose(f); } }
 
             // AR feedback: run PE through LM (KV cache) → hidden_proj
             float new_hidden[1536];
@@ -447,13 +450,6 @@ int main(int argc, char ** argv) {
                 for (int i = 0; i < 1536; i++) s += hpw[o * 1536 + i] * new_hidden[i];
                 cnd[o] = s;
             }
-            // Normalize to match Python AR feedback statistics (RMS ~0.55)
-            // C++ PE output has different statistics, causing LM to produce larger hidden_proj.
-            // Scale to match Python's expected range.
-            { float rms = 0; for (int i = 0; i < 1024; i++) rms += cnd[i]*cnd[i];
-              rms = sqrtf(rms/1024);
-              float scale = 0.55f / (rms + 1e-8f);
-              for (int i = 0; i < 1024; i++) cnd[i] *= scale; }
             memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
         }
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
