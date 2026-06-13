@@ -297,3 +297,20 @@ target_link_libraries(test_cp2 PRIVATE ggml pthread m)
 add_executable(test_bv_full test/test_bv_full.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
 target_include_directories(test_bv_full PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
 target_link_libraries(test_bv_full PRIVATE ggml pthread m)
+
+
+
+# BigVGAN comparison test
+
+add_executable(test_bv_cmp2 test/test_bv_cmp2.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_bv_cmp2 PRIVATE include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_bv_cmp2 PRIVATE ggml m pthread)
+
+
+add_executable(test_bv_quick test/test_bv_quick.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_bv_quick PRIVATE include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_bv_quick PRIVATE ggml m pthread)
+
+add_executable(test_bv_stage test/test_bv_stage.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
+target_include_directories(test_bv_stage PRIVATE include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
+target_link_libraries(test_bv_stage PRIVATE ggml m pthread)
