@@ -16,6 +16,7 @@
 #include "ggml-cpu.h"
 #include "llm_manual.h"
 #include "mt19937.h"
+#include "zig_normal.h"
 #include "noise_data.h"
 #include <cstdio>
 #include <cstdlib>
@@ -316,7 +317,7 @@ int main(int argc, char ** argv) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
-        for (int i = 0; i < patch_flat; i++) { float z = mt.normal(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
+        for (int i = 0; i < patch_flat; i++) { float z = zig_normal(mt); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
@@ -391,7 +392,7 @@ int main(int argc, char ** argv) {
                 }
             }
             delete[] dx_data; delete[] out_data;
-            if (has_nan) { printf("(NaN) "); for (int i=0;i<patch_flat;i++){float z=mt.normal();if(z>5)z=5;if(z<-5)z=-5;z_t[i]=z;} history_len=0; break; }
+            if (has_nan) { printf("(NaN) "); for (int i=0;i<patch_flat;i++){float z=zig_normal(mt);if(z>5)z=5;if(z<-5)z=-5;z_t[i]=z;} history_len=0; break; }
 
             // CFG: blend with null-conditioning velocity
             if (cfg_scale > 1.001f && dit.hidden_proj_b && !has_nan) {
