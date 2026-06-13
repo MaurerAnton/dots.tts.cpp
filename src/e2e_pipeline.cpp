@@ -341,13 +341,15 @@ int main(int argc, char ** argv) {
                   } }
               for (int i = 0; i < patch_size; i++) { float * op = dx_data + (noise_pos + i) * DIT_HIDDEN_SIZE;
                   if (dit.coord_proj_w) {
-                      ggml_tensor * nv_t = ggml_new_tensor_2d(w_ctx_dit, GGML_TYPE_F32, latent_dim, 1);
-                      memcpy(tensor_data(nv_t), z_t + i * latent_dim, latent_dim * sizeof(float));
-                      ggml_tensor * proj = ggml_mul_mat(w_ctx_dit, dit.coord_proj_w, nv_t);
-                      if (dit.coord_proj_b) proj = ggml_add(w_ctx_dit, proj, dit.coord_proj_b);
-                      { ggml_cgraph * cg = ggml_new_graph(w_ctx_dit); ggml_build_forward_expand(cg, proj);
-                        ggml_graph_compute_with_ctx(w_ctx_dit, cg, 1); }
-                      memcpy(op, tensor_data(proj), DIT_HIDDEN_SIZE * sizeof(float));
+                      // Manual matmul: op = coord_weight @ noise_vector + bias
+                      float * cw = tensor_data(dit.coord_proj_w);
+                      float * nv = z_t + i * latent_dim;
+                      float * cb = dit.coord_proj_b ? tensor_data(dit.coord_proj_b) : nullptr;
+                      for (int j = 0; j < DIT_HIDDEN_SIZE; j++) {
+                          float s = cb ? cb[j] : 0.0f;
+                          for (int k = 0; k < latent_dim; k++) s += nv[k] * cw[j * latent_dim + k];
+                          op[j] = s;
+                      }
                   } }
               for (int p = 0; p < cond_seq; p++) { float * pos = dx_data + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                   r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } } }
@@ -444,6 +446,14 @@ int main(int argc, char ** argv) {
 
             // Euler step
             for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;}
+            // Dump latents and dx_data at each step for pair checking
+            if (call == 0) {
+                char fname[64];
+                snprintf(fname, sizeof(fname), "debug/lat_s%d.bin", step);
+                FILE * f = fopen(fname, "wb"); if(f){fwrite(z_t,sizeof(float),patch_flat,f);fclose(f);}
+                snprintf(fname, sizeof(fname), "debug/dx_s%d.bin", step);
+                f = fopen(fname, "wb"); if(f){fwrite(dx_data,sizeof(float),cond_seq*DIT_HIDDEN_SIZE,f);fclose(f);}
+            }
         }
 
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
