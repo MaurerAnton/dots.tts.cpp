@@ -5,8 +5,6 @@
 #include "dots_tts.h"
 #include "dots_tts_util.h"
 #include "dit.h"
-#include "ggml.h"
-#include "ggml-cpu.h"
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -123,27 +121,17 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
     for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, h+t*hidden, hidden);
         for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scl[i])+sml[i]; }
     
-    // FFN: use ggml (SIMD-optimized, ~20x faster than manual loops)
+    // FFN: manual computation (byte-perfect, matching DiT velocity verification)
     {
-        static thread_local ggml_context * ffn_ctx = nullptr;
-        static thread_local ggml_init_params ffn_gp = { .mem_size = 64ULL*1024*1024 };
-        if (!ffn_ctx) ffn_ctx = ggml_init(ffn_gp);
-        else ggml_reset(ffn_ctx);
-        
-        ggml_tensor * xt = ggml_new_tensor_2d(ffn_ctx, GGML_TYPE_F32, hidden, n_tokens);
-        memcpy(xt->data, mod, n_tokens * hidden * sizeof(float));
-        ggml_tensor * f1 = ggml_mul_mat(ffn_ctx, block.ffn_w1, xt);
-        if (block.ffn_b1) f1 = ggml_add(ffn_ctx, f1, block.ffn_b1);
-        f1 = ggml_gelu(ffn_ctx, f1);
-        ggml_tensor * f2 = ggml_mul_mat(ffn_ctx, block.ffn_w2, f1);
-        if (block.ffn_b2) f2 = ggml_add(ffn_ctx, f2, block.ffn_b2);
-        ggml_cgraph * cg = ggml_new_graph(ffn_ctx);
-        ggml_build_forward_expand(cg, f2);
-        ggml_graph_compute_with_ctx(ffn_ctx, cg, 1);
-        const float * f2d = (const float*)f2->data;
-        for (int t = 0; t < n_tokens; t++)
-            for (int i = 0; i < hidden; i++)
-                out[t*hidden+i] = h[t*hidden+i] + gml[i] * f2d[t*hidden+i];
+        float * fh1 = new float[n_tokens*DIT_FFN_SIZE], * fh2 = new float[n_tokens*hidden];
+        float * fw1=tensor_data(block.ffn_w1), * fw2=tensor_data(block.ffn_w2);
+        float * fb1=block.ffn_b1?tensor_data(block.ffn_b1):nullptr, * fb2=block.ffn_b2?tensor_data(block.ffn_b2):nullptr;
+        for(int t=0;t<n_tokens;t++){ manual_linear(fh1+t*DIT_FFN_SIZE, mod+t*hidden, fw1, fb1, hidden, DIT_FFN_SIZE);
+            for(int i=0;i<DIT_FFN_SIZE;i++){ float xv=fh1[t*DIT_FFN_SIZE+i]; float x2=xv*xv;
+                fh1[t*DIT_FFN_SIZE+i]=0.5f*xv*(1.0f+tanhf(0.7978845608f*(xv+0.044715f*x2*xv))); }
+            manual_linear(fh2+t*hidden, fh1+t*DIT_FFN_SIZE, fw2, fb2, DIT_FFN_SIZE, hidden); }
+        for(int i=0;i<n_tokens*hidden;i++) out[i]=h[i]+gml[i%hidden]*fh2[i];
+        delete[] fh1; delete[] fh2;
     }
     delete[] cs; delete[] adaln_raw; delete[] normed; delete[] mod; delete[] ao; delete[] h;
 }
