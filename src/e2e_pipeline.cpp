@@ -36,8 +36,8 @@ bool load_patchenc_weights(SafeTensorsFile & sf, ggml_context * w_ctx, patch_enc
 bool extract_embeddings(const char * gguf_path, const char * out_path);
 static double now_ms() { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec*1000.0 + ts.tv_nsec/1000000.0; }
 
-// Local compute_cond (replaces dit_forward_raw's compute_cond)
-static void compute_cond(dit_model & m, float t_val, const float * spk_emb, float * cond) {
+// Local compute_cond with speaker_scale support (matching Python)
+static void compute_cond(dit_model & m, float t_val, const float * spk_emb, float speaker_scale, float * cond) {
     int half=128; float se[256], h1[1024];
     for(int i=0;i<half;i++){float f=expf(-logf(10000.0f)*(float)i/(float)half);
         se[i]=cosf(t_val*f); se[half+i]=sinf(t_val*f);}
@@ -50,7 +50,7 @@ static void compute_cond(dit_model & m, float t_val, const float * spk_emb, floa
      float mean=0;for(int i=0;i<1024;i++)mean+=t[i];mean/=1024;
      float var=0;for(int i=0;i<1024;i++){float d=t[i]-mean;var+=d*d;}var=var/1024+1e-5f;
      float istd=1.0f/sqrtf(var);float*lw=m.spk_ln_w?tensor_data(m.spk_ln_w):nullptr,*lb=m.spk_ln_b?tensor_data(m.spk_ln_b):nullptr;
-     for(int i=0;i<1024;i++){float x=(t[i]-mean)*istd;if(lw)x*=lw[i];if(lb)x+=lb[i];cond[i]+=x;}}
+     for(int i=0;i<1024;i++){float x=(t[i]-mean)*istd;if(lw)x*=lw[i];if(lb)x+=lb[i];cond[i]+=x*speaker_scale;}}
 }
 static float randn() { float u1=(float)rand()/RAND_MAX,u2=(float)rand()/RAND_MAX; if(u1<1e-6f)u1=1e-6f; return sqrtf(-2.0f*logf(u1))*cosf(2.0f*3.14159f*u2); }
 
@@ -158,7 +158,7 @@ int main(int argc, char ** argv) {
                 for (int p = 0; p < cond_seq; p++) { float *pos = dx + p * DIT_HIDDEN_SIZE, r = 0; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) r += pos[j] * pos[j];
                     r = sqrtf(r / DIT_HIDDEN_SIZE); if (r > 10.0f) { float s = 10.0f / r; for (int j = 0; j < DIT_HIDDEN_SIZE; j++) pos[j] *= s; } }
 
-                float cond[1024]; compute_cond(dit, t, nullptr, cond);
+                float cond[1024]; compute_cond(dit, t, nullptr, 1.0f, cond);
                 float *h = new float[cond_seq * DIT_HIDDEN_SIZE], *bo = new float[cond_seq * DIT_HIDDEN_SIZE];
                 { float *iw = tensor_data(dit.input_layer_w); float *ib = dit.input_layer_b ? tensor_data(dit.input_layer_b) : nullptr;
                   for (int ti = 0; ti < cond_seq; ti++) manual_linear(h + ti * DIT_HIDDEN_SIZE, dx + ti * DIT_HIDDEN_SIZE, iw, ib, DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE); }
@@ -226,7 +226,9 @@ int main(int argc, char ** argv) {
     int n_tok = (int)token_ids_vec.size();
     if (n_tok == 0) { fprintf(stderr, "Empty tokenization\n"); return 1; }
     int32_t * token_ids = token_ids_vec.data();
-    printf("  Tokenized: %d tokens\n", n_tok);
+    printf("  Tokenized: %d tokens [", n_tok);
+    for (int i = 0; i < n_tok && i < 20; i++) { printf("%s%d", i?"," : "", token_ids[i]); }
+    printf("]\n");
 
     uint32_t hash = use_force_seed ? force_seed : 5381;
     if (!use_force_seed) for (int i = 0; i < n_tok; i++) hash = ((hash << 5) + hash) + token_ids[i];
@@ -273,7 +275,8 @@ int main(int argc, char ** argv) {
     printf("  DiT: %d layers, PE: loaded\n", DIT_NUM_LAYERS);
 
     float spk_emb[512] = {0};
-    printf("  Speaker: zeros (matching calibration)\n");
+    const float speaker_scale = 1.5f;  // matching Python default
+    printf("  Speaker: zeros, scale=%.1f (matching Python)\n", speaker_scale);
 
     // === Conditioning: hidden_proj on last token's hidden state ===
     printf("[3] Conditioning...\n");
@@ -359,7 +362,7 @@ int main(int argc, char ** argv) {
                 FILE * f = fopen("debug/cpp_dit_input.bin", "wb");
                 if (f) { fwrite(dx_data, sizeof(float), cond_seq * DIT_HIDDEN_SIZE, f); fclose(f); }
             }
-            float cond[1024]; compute_cond(dit, t, nullptr, cond);  // nullptr = no speaker (matching pyctx)
+            float cond[1024]; compute_cond(dit, t, spk_emb, speaker_scale, cond);
             float * h_dit = new float[cond_seq * DIT_HIDDEN_SIZE];
             {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
              for(int ti=0;ti<cond_seq;ti++) manual_linear(h_dit+ti*DIT_HIDDEN_SIZE,dx_data+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}
@@ -415,7 +418,7 @@ int main(int argc, char ** argv) {
                       } } }
                 float * out_null = new float[cond_seq * VAE_LATENT_DIM];
                 {
-                    float null_cond[1024]; compute_cond(dit, t, nullptr, null_cond);
+                    float null_cond[1024]; compute_cond(dit, t, spk_emb, speaker_scale, null_cond);
                     float * hn = new float[cond_seq * DIT_HIDDEN_SIZE];
                     {float*iw=tensor_data(dit.input_layer_w);float*ib=dit.input_layer_b?tensor_data(dit.input_layer_b):nullptr;
                      for(int ti=0;ti<cond_seq;ti++) manual_linear(hn+ti*DIT_HIDDEN_SIZE,dx_null+ti*DIT_HIDDEN_SIZE,iw,ib,DIT_HIDDEN_SIZE,DIT_HIDDEN_SIZE);}

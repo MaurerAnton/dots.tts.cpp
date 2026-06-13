@@ -47,7 +47,7 @@ target_include_directories(e2e_pipeline PRIVATE
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
     ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
 )
-target_link_libraries(e2e_pipeline PRIVATE ${LLAMA_LIB} ggml pthread m)
+target_link_libraries(e2e_pipeline PRIVATE ${LLAMA_LIB} ggml pthread m openblas)
 
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
@@ -314,3 +314,54 @@ target_link_libraries(test_bv_quick PRIVATE ggml m pthread)
 add_executable(test_bv_stage test/test_bv_stage.cpp src/modules/vocoder/bigvgan_cpp.cpp src/modules/vocoder/lstm.cpp src/utils/safetensors.cpp)
 target_include_directories(test_bv_stage PRIVATE include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src)
 target_link_libraries(test_bv_stage PRIVATE ggml m pthread)
+
+# ---- DiT comparison test (C++ vs Python on same input) ----
+add_executable(test_dit_compare test/test_dit_compare.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/modules/vocoder/lstm.cpp)
+target_include_directories(test_dit_compare PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_dit_compare PRIVATE ggml pthread m openblas)
+
+# ---- E2E pipeline v4 (matching Python _generate_latents_stream) ----
+add_executable(e2e_pipeline_v4
+    src/e2e_pipeline_v4.cpp
+    src/gpt2_bpe_tokenizer.cpp
+    src/gguf_extract.cpp
+    src/modules/backbone/dit_forward.cpp
+    src/modules/backbone/dit_attention.cpp
+    src/modules/backbone/patchenc.cpp
+    src/modules/vocoder/audiovae.cpp
+    src/modules/vocoder/bigvgan_cpp.cpp
+    src/modules/vocoder/lstm.cpp
+    src/utils/safetensors.cpp src/modules/vocoder/lstm.cpp
+    src/llm_manual.cpp
+    src/utils/dit_loader.cpp
+    src/utils/patchenc_loader.cpp
+    src/modules/speaker/campp.cpp
+    src/modules/vocoder/audiovae_encoder.cpp
+)
+target_include_directories(e2e_pipeline_v4 PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/common
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(e2e_pipeline_v4 PRIVATE ${LLAMA_LIB} ggml pthread m openblas)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(e2e_pipeline_v4 PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_options(e2e_pipeline_v4 PRIVATE ${OpenMP_CXX_FLAGS})
+endif()
+
+# ---- BLAS linear comparison test ----
+add_executable(test_blas_linear test/test_blas_linear.cpp
+    src/utils/safetensors.cpp src/utils/dit_loader.cpp src/modules/vocoder/lstm.cpp)
+target_include_directories(test_blas_linear PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/include
+    ${CMAKE_SOURCE_DIR}/../llama/llama.cpp/ggml/src
+)
+target_link_libraries(test_blas_linear PRIVATE ggml pthread m openblas)

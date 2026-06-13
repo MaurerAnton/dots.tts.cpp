@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <cblas.h>
 
 inline void manual_layernorm(float * out, const float * x, int n) {
     float mean = 0; for (int i = 0; i < n; i++) mean += x[i]; mean /= n;
@@ -25,18 +26,36 @@ inline void manual_rms_norm(float * out, const float * x, const float * weight, 
     for (int i = 0; i < n; i++) { float v = x[i] * inv; if (weight) v *= weight[i]; out[i] = v; }
 }
 
+// BLAS-based linear: uses OpenBLAS sgemm for large matrices, manual loops for small ones
 inline void manual_linear(float * out, const float * x, const float * w, const float * bias, int in_feat, int out_feat) {
-    if (bias) {
-        for (int o = 0; o < out_feat; o++) {
-            float s = bias[o];
-            for (int i = 0; i < in_feat; i++) s += w[o * in_feat + i] * x[i];
-            out[o] = s;
+    // Use BLAS only for large matmuls (DiT FFN, projections).
+    // Small attention matmuls (128-dim heads) are faster with manual loops.
+    // Use BLAS only for DiT matmuls (hidden=1024, output=128).
+    // LLM matmuls (1536, 256, 8960) use manual loops — already byte-perfect.
+    bool use_blas = (in_feat == 1024 || out_feat == 128);
+    if (use_blas) {
+        if (bias) {
+            for (int o = 0; o < out_feat; o++) out[o] = bias[o];
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                1, out_feat, in_feat, 1.0f, x, in_feat, w, in_feat, 1.0f, out, out_feat);
+        } else {
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                1, out_feat, in_feat, 1.0f, x, in_feat, w, in_feat, 0.0f, out, out_feat);
         }
     } else {
-        for (int o = 0; o < out_feat; o++) {
-            float s = 0.0f;
-            for (int i = 0; i < in_feat; i++) s += w[o * in_feat + i] * x[i];
-            out[o] = s;
+        // Manual loop for small matrices (lower overhead)
+        if (bias) {
+            for (int o = 0; o < out_feat; o++) {
+                float s = bias[o];
+                for (int i = 0; i < in_feat; i++) s += w[o * in_feat + i] * x[i];
+                out[o] = s;
+            }
+        } else {
+            for (int o = 0; o < out_feat; o++) {
+                float s = 0.0f;
+                for (int i = 0; i < in_feat; i++) s += w[o * in_feat + i] * x[i];
+                out[o] = s;
+            }
         }
     }
 }
@@ -70,7 +89,8 @@ inline void manual_attention(float * out, const float * x,
     const float * qw, const float * kw, const float * vw, const float * ow,
     const float * qb, const float * kb, const float * vb, const float * ob,
     const float * qnw, const float * knw,
-    int n_tokens, int hidden, int n_heads, int head_dim) {
+    int n_tokens, int hidden, int n_heads, int head_dim,
+    const bool * attn_mask = nullptr, const float * pos_ids = nullptr) {
     int n = n_tokens * hidden;
     float * q = new float[n], * k = new float[n], * v = new float[n];
     for (int t = 0; t < n_tokens; t++) {
@@ -87,11 +107,35 @@ inline void manual_attention(float * out, const float * x,
             vh[t*head_dim+d]=v[t*hidden+h*head_dim+d]; }
         for (int t=0;t<n_tokens;t++) { manual_rms_norm(qh+t*head_dim, qh+t*head_dim, qnw, head_dim);
             manual_rms_norm(kh+t*head_dim, kh+t*head_dim, knw, head_dim); }
-        manual_rope(qh, kh, n_tokens, head_dim);
+        // Use pos_ids if provided, otherwise sequential 0..n_tokens-1
+        if (pos_ids) {
+            float theta_init = 1.0f;
+            for (int t = 0; t < n_tokens; t++) {
+                float theta = theta_init; float ts = powf(10000.0f, -2.0f/head_dim);
+                float pos = pos_ids[t];
+                int half = head_dim/2;
+                for (int d = 0; d < half; d++) {
+                    float cs = cosf(pos * theta), sn = sinf(pos * theta);
+                    int i1 = t*head_dim + d, i2 = t*head_dim + d + half;
+                    float q0=qh[i1], q1=qh[i2], k0=kh[i1], k1=kh[i2];
+                    qh[i1]=q0*cs-q1*sn; qh[i2]=q1*cs+q0*sn;
+                    kh[i1]=k0*cs-k1*sn; kh[i2]=k1*cs+k0*sn;
+                    theta *= ts;
+                }
+            }
+        } else {
+            manual_rope(qh, kh, n_tokens, head_dim);
+        }
         float scale=1.0f/sqrtf((float)head_dim);
-        for(int i=0;i<n_tokens;i++){ for(int j=0;j<n_tokens;j++){ float s=0;
-            for(int d=0;d<head_dim;d++) s+=qh[i*head_dim+d]*kh[j*head_dim+d]; scores[i*n_tokens+j]=s*scale; }
-            manual_softmax(scores+i*n_tokens,n_tokens); }
+        for(int i=0;i<n_tokens;i++){
+            for(int j=0;j<n_tokens;j++){
+                float s=0;
+                for(int d=0;d<head_dim;d++) s+=qh[i*head_dim+d]*kh[j*head_dim+d];
+                scores[i*n_tokens+j]=s*scale;
+                if (attn_mask && !attn_mask[i*n_tokens+j]) scores[i*n_tokens+j] = -INFINITY;
+            }
+            manual_softmax(scores+i*n_tokens,n_tokens);
+        }
         for(int i=0;i<n_tokens;i++) for(int d=0;d<head_dim;d++){ float s=0;
             for(int j=0;j<n_tokens;j++) s+=scores[i*n_tokens+j]*vh[j*head_dim+d]; ao_flat[i*hidden+h*head_dim+d]=s; }
         delete[] qh; delete[] kh; delete[] vh;
@@ -102,7 +146,7 @@ inline void manual_attention(float * out, const float * x,
 }
 
 inline void manual_dit_block(const float * x_in, const float * cond, const dit_block & block,
-    float * out, int n_tokens) {
+    float * out, int n_tokens, const bool * attn_mask = nullptr, const float * pos_ids = nullptr) {
     int hidden = DIT_HIDDEN_SIZE;
     float * cs = new float[1024]; for(int i=0;i<1024;i++) cs[i]=cond[i]/(1.0f+expf(-cond[i]));
     float * adaln_raw = new float[6*DIT_HIDDEN_SIZE];
@@ -117,7 +161,7 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
         tensor_data(block.attn_v_weight), tensor_data(block.attn_o_weight),
         nullptr,nullptr,nullptr, block.attn_o_bias?tensor_data(block.attn_o_bias):nullptr,
         block.q_norm_w?tensor_data(block.q_norm_w):nullptr, block.k_norm_w?tensor_data(block.k_norm_w):nullptr,
-        n_tokens,hidden,DIT_NUM_HEADS,DIT_HEAD_SIZE);
+        n_tokens,hidden,DIT_NUM_HEADS,DIT_HEAD_SIZE, attn_mask, pos_ids);
     float * h = new float[n_tokens*hidden];
     for(int i=0;i<n_tokens*hidden;i++) h[i]=x_in[i]+gm[i%hidden]*ao[i];
     for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, h+t*hidden, hidden);

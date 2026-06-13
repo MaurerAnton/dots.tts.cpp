@@ -23,6 +23,7 @@ bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m)
     m.out_adaln_b = nullptr;
     m.out_proj_b = m.hidden_proj_b = m.latent_proj_b = m.coord_proj_b = nullptr;
     m.input_layer_b = nullptr;
+    m.eos_proj_w2 = m.eos_proj_b2 = m.eos_proj_w1 = m.eos_proj_b1 = nullptr;
 
     auto load = [&](const char * sf_name, ggml_tensor * & field) -> bool {
         const st_tensor_info * info = sf.find(sf_name);
@@ -103,6 +104,12 @@ bool load_dit_weights(SafeTensorsFile & sf, ggml_context * w_ctx, dit_model & m)
     load("latent_proj.bias",   m.latent_proj_b);
     load("coordinate_proj.weight", m.coord_proj_w);
     load("coordinate_proj.bias",   m.coord_proj_b);
+
+    // EOS projection: full 2-layer MLP
+    load("eos_proj.0.weight", m.eos_proj_w1);
+    load("eos_proj.0.bias",   m.eos_proj_b1);
+    load("eos_proj.2.weight", m.eos_proj_w2);
+    load("eos_proj.2.bias",   m.eos_proj_b2);
 
     load("velocity_field_predictor.input_layer.weight", m.input_layer_w);
     load("velocity_field_predictor.input_layer.bias",   m.input_layer_b);
