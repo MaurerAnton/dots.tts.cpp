@@ -333,9 +333,9 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     dec.buf2.resize(max_len * max_ch);
     dec.buf3.resize(max_len * max_ch); // extra temp for activation
     // For activation temp (up to 3x original during upsample intermediates)
-    dec.buf_act_up.resize(max_len * max_ch * 2);
-    dec.buf_act_down.resize(max_len * max_ch * 2);
-    dec.buf_amp_save.resize(max_len * max_ch);
+    dec.buf_act_up.resize(max_len * max_ch * 4);
+    dec.buf_act_down.resize(max_len * max_ch * 4);
+    dec.buf_amp_save.resize(max_len * max_ch * 2);
 
     float * x = dec.buf1.data(), * tmp = dec.buf2.data(), * tmp2 = dec.buf3.data();
     float * amp_save = dec.buf_amp_save.data();
