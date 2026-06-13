@@ -458,6 +458,11 @@ int main(int argc, char ** argv) {
             memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
             ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
             float * pe_data = tensor_data(pe_out);
+            // Dump latents and PE for verification
+            { char fname[64]; snprintf(fname, sizeof(fname), "debug/lat_call%d.bin", call);
+              FILE * f = fopen(fname, "wb"); if(f){fwrite(z_t,sizeof(float),patch_flat,f);fclose(f);}
+              snprintf(fname, sizeof(fname), "debug/pe_call%d.bin", call);
+              f = fopen(fname, "wb"); if(f){fwrite(pe_data,sizeof(float),1536,f);fclose(f);} }
             float new_hidden[1536];
             llm_kv_cache_step(llm_w, pe_data, kv_cache, new_hidden);
             float * hpw = tensor_data(dit.hidden_proj_w);
@@ -469,6 +474,9 @@ int main(int argc, char ** argv) {
                 cnd[o] = s;
             }
             memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
+            // Dump AR for verification
+            { char fname[64]; snprintf(fname, sizeof(fname), "debug/ar_call%d.bin", call+1);
+              FILE * f = fopen(fname, "wb"); if(f){fwrite(cnd,sizeof(float),1024,f);fclose(f);} }
         }
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
         printf("rms=%.4f  [%d ms]\n", sqrtf(ms/patch_flat), (int)(now_ms()-tcall));
