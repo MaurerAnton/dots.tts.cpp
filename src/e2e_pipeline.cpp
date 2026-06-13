@@ -316,8 +316,7 @@ int main(int argc, char ** argv) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
-        if (call < 7) memcpy(z_t, NOISE[call], patch_flat * sizeof(float));
-        else for (int i = 0; i < patch_flat; i++) { float z = mt.normal(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
+        for (int i = 0; i < patch_flat; i++) { float z = mt.normal(); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
@@ -448,18 +447,25 @@ int main(int argc, char ** argv) {
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         memcpy(history_latents + history_len * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
         history_len += frames_per_call; total_frames += frames_per_call;
-        // AR feedback: load from Python fm_sequence files (entry 1 = hidden_proj)
-        if (call < n_calls - 1) {
-            char fname[64]; snprintf(fname, sizeof(fname), "py_call%d_fmseq.bin", call+1);
-            FILE * f = fopen(fname, "rb");
-            if (f) {
-                fseek(f, 1024 * sizeof(float), SEEK_SET);  // skip entry 0 (text hp)
-                float cnd[1024];
-                if (fread(cnd, sizeof(float), 1024, f) == 1024) {
-                    memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
-                }
-                fclose(f);
+        // AR feedback: PatchEncoder → KV Cache → hidden_proj (pure C++)
+        if (pe.in_proj_w && call < n_calls - 1) {
+            if (!gctx) { ggml_init_params gp2 = { .mem_size = 256ULL*1024*1024 }; gctx = ggml_init(gp2); }
+            else ggml_reset(gctx);
+            ggml_tensor * pe_x = ggml_new_tensor_2d(gctx, GGML_TYPE_F32, latent_dim, patch_size);
+            memcpy(tensor_data(pe_x), z_t, patch_flat * sizeof(float));
+            ggml_tensor * pe_out = patchenc_forward(pe, gctx, pe_x, 1);
+            float * pe_data = tensor_data(pe_out);
+            float new_hidden[1536];
+            llm_kv_cache_step(llm_w, pe_data, kv_cache, new_hidden);
+            float * hpw = tensor_data(dit.hidden_proj_w);
+            float * hpb = dit.hidden_proj_b ? tensor_data(dit.hidden_proj_b) : nullptr;
+            float cnd[1024];
+            for (int o = 0; o < 1024; o++) {
+                float s = hpb ? hpb[o] : 0.0f;
+                for (int i = 0; i < 1536; i++) s += hpw[o * 1536 + i] * new_hidden[i];
+                cnd[o] = s;
             }
+            memcpy(cond_llm_data + (1+call)*DIT_HIDDEN_SIZE, cnd, DIT_HIDDEN_SIZE*sizeof(float));
         }
         float ms=0; for(int i=0;i<patch_flat;i++){if(std::isnan(z_t[i])||std::isinf(z_t[i]))z_t[i]=0;ms+=z_t[i]*z_t[i];}
         printf("rms=%.4f  [%d ms]\n", sqrtf(ms/patch_flat), (int)(now_ms()-tcall));
