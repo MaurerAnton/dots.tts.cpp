@@ -24,6 +24,7 @@ void lstm_forward(const float * x, int seq_len, int hidden, int n_layers,
 // ============ Hardcoded anti-alias filter (Kaiser-sinc, 12-tap, causal) ============
 // Computed by kaiser_sinc_filter1d(cutoff=0.25, half_width=0.3, kernel_size=12)
 // All 216 AMP activation filters are identical to this
+// AA filter matching Python's kaiser_sinc_filter1d(cutoff=0.25, half_width=0.3, K=12)
 static const float AA_FILTER[12] = {
     0.00202896f, 0.00938947f, -0.02554346f, -0.05765738f,
     0.12857258f, 0.44320980f, 0.44320980f, 0.12857258f,
@@ -452,10 +453,24 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
                 // a1: aa_snakebeta on act_up (work copy)
                 memcpy(act_up, residual, cur_len * cur_ch * sizeof(float));
+                // Save input for Python comparison (rb0, pair0, a1)
+                if (s == 0 && j == 0 && pair == 0) {
+                    FILE * f = fopen("/tmp/cpp_sb_in.bin", "wb");
+                    fwrite(act_up, sizeof(float), cur_len*cur_ch, f); fclose(f);
+                }
                 aa_snakebeta(act_up, cur_len, cur_ch,
                              dec.rb_alpha[rb][act1_idx].ptr(),
                              dec.rb_beta[rb][act1_idx].ptr(),
                              true, residual/*buf_up*/, amp_save/*buf_down*/, max_len * 2);
+                // Debug: print filter used
+                if (s == 0 && j == 0 && pair == 0) {
+                    fprintf(stderr, "FILTER[0]=%.6f FILTER[6]=%.6f\n", AA_FILTER[0], AA_FILTER[6]);
+                }
+                // Save output
+                if (s == 0 && j == 0 && pair == 0) {
+                    FILE * f = fopen("/tmp/cpp_sb_out.bin", "wb");
+                    fwrite(act_up, sizeof(float), cur_len*cur_ch, f); fclose(f);
+                }
 
                 // c1: dilated conv, act_up -> residual
                 conv1d_causal(residual, act_up, cur_ch, cur_len,
@@ -482,6 +497,13 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
 
 
             // Add this resblock's output to x
+            { float rms=0; for(int i=0;i<cur_len*cur_ch;i++) rms+=residual[i]*residual[i];
+              printf("    rb%d rms=%.4f\n", rb, sqrtf(rms/(cur_len*cur_ch))); }
+            // Save rb0 for Python comparison
+            if (s == 0 && j == 0) {
+                FILE * f = fopen("/tmp/cpp_rb0.bin", "wb");
+                fwrite(residual, sizeof(float), cur_len*cur_ch, f); fclose(f);
+            }
             for (int i = 0; i < cur_len * cur_ch; i++)
                 x[i] += residual[i];
         }
