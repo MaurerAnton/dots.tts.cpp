@@ -317,7 +317,8 @@ int main(int argc, char ** argv) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls);
         if (call > 0) { if (gctx) ggml_free(gctx); gctx = ggml_init(gp); }
-        for (int i = 0; i < patch_flat; i++) { float z = zig_normal(mt); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
+        if (call < 7) memcpy(z_t, NOISE[call], patch_flat * sizeof(float));
+        else for (int i = 0; i < patch_flat; i++) { float z = zig_normal(mt); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
 
         for (int step = 0; step < nfe; step++) {
             float t = (float)step * dt;
