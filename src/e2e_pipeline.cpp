@@ -444,16 +444,7 @@ int main(int argc, char ** argv) {
                 delete[] dx_null; delete[] out_null;
             }
 
-            // Euler step
             for(int i=0;i<patch_flat;i++){z_t[i]+=v_t[i]*dt;}
-            // Dump latents and dx_data at each step for pair checking
-            if (call == 0) {
-                char fname[64];
-                snprintf(fname, sizeof(fname), "debug/lat_s%d.bin", step);
-                FILE * f = fopen(fname, "wb"); if(f){fwrite(z_t,sizeof(float),patch_flat,f);fclose(f);}
-                snprintf(fname, sizeof(fname), "debug/dx_s%d.bin", step);
-                f = fopen(fname, "wb"); if(f){fwrite(dx_data,sizeof(float),cond_seq*DIT_HIDDEN_SIZE,f);fclose(f);}
-            }
         }
 
         memcpy(all_latents + call * frames_per_call * latent_dim, z_t, frames_per_call * latent_dim * sizeof(float));
