@@ -180,28 +180,26 @@ void convT1d_causal(float * out, const float * in, int ic, int ilen,
     int olen_full = (ilen - 1) * stride + K; // padding=0
     *olen = olen_full - stride; // causal trim
     memset(out, 0, olen_full * oc * sizeof(float));
-    // For each input position i:
-    //   out[i*stride + k][o] += in[i][c] * weight[c][o][k]
     for (int i = 0; i < ilen; i++) {
         for (int k = 0; k < K; k++) {
             int ot = i * stride + k;
             if (ot >= 0 && ot < olen_full) {
-                for (int o = 0; o < oc; o++) {
-                    float s = 0;
-                    for (int c = 0; c < ic; c++)
-                        s += in[i * ic + c] * w[(c * oc + o) * K + k];
-                    out[ot * oc + o] += s;
+                for (int c = 0; c < ic; c++) {
+                    float val = in[i * ic + c];
+                    for (int o = 0; o < oc; o++) {
+                        out[ot * oc + o] += val * w[(c * oc + o) * K + k];
+                    }
                 }
             }
         }
     }
-    // Add bias after all contributions
+    // Add bias
     if (bias) {
         for (int t = 0; t < *olen; t++)
             for (int o = 0; o < oc; o++)
                 out[t * oc + o] += bias[o];
     }
-    // Trim: keep only first *olen samples
+    // Trim
     if (*olen < olen_full) {
         memmove(out, out, (*olen) * oc * sizeof(float));
     }
@@ -462,10 +460,6 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
                              dec.rb_alpha[rb][act1_idx].ptr(),
                              dec.rb_beta[rb][act1_idx].ptr(),
                              true, residual/*buf_up*/, amp_save/*buf_down*/, max_len * 2);
-                // Debug: print filter used
-                if (s == 0 && j == 0 && pair == 0) {
-                    fprintf(stderr, "FILTER[0]=%.6f FILTER[6]=%.6f\n", AA_FILTER[0], AA_FILTER[6]);
-                }
                 // Save output
                 if (s == 0 && j == 0 && pair == 0) {
                     FILE * f = fopen("/tmp/cpp_sb_out.bin", "wb");
