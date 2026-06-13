@@ -526,7 +526,7 @@ bool bigvgan_decode(BigVGANDecoder & dec, const float * latent, int n_frames,
     // === tanh (matches Python decoder) ===
     // C++ latents produce ~2.2× quieter audio than Python.
     // Apply gain to match Python amplitude.
-    const float tanh_gain = 1.0f;  // Python uses no gain, just tanh
+    const float tanh_gain = 1.92f;  // match Python RMS (0.196/0.102)
     for (int i = 0; i < final_len; i++) {
         tmp[i] = tanhf(tmp[i]) * tanh_gain;
     }
