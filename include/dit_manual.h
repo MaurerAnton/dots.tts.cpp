@@ -167,26 +167,33 @@ inline void manual_dit_block(const float * x_in, const float * cond, const dit_b
     for(int t=0;t<n_tokens;t++){ manual_layernorm(normed+t*hidden, h+t*hidden, hidden);
         for(int i=0;i<hidden;i++) mod[t*hidden+i]=normed[t*hidden+i]*(1.0f+scl[i])+sml[i]; }
     
-    // FFN: use ggml (SIMD-optimized)
+    // FFN: manual BLAS + GELU with static buffers (avoids heap fragmentation)
     {
-        static thread_local ggml_context * ffn_ctx = nullptr;
-        static thread_local ggml_init_params ffn_gp = { .mem_size = 64ULL*1024*1024 };
-        if (!ffn_ctx) ffn_ctx = ggml_init(ffn_gp);
-        else ggml_reset(ffn_ctx);
-        ggml_tensor * xt = ggml_new_tensor_2d(ffn_ctx, GGML_TYPE_F32, hidden, n_tokens);
-        memcpy(xt->data, mod, n_tokens * hidden * sizeof(float));
-        ggml_tensor * f1 = ggml_mul_mat(ffn_ctx, block.ffn_w1, xt);
-        if (block.ffn_b1) f1 = ggml_add(ffn_ctx, f1, block.ffn_b1);
-        f1 = ggml_gelu(ffn_ctx, f1);
-        ggml_tensor * f2 = ggml_mul_mat(ffn_ctx, block.ffn_w2, f1);
-        if (block.ffn_b2) f2 = ggml_add(ffn_ctx, f2, block.ffn_b2);
-        ggml_cgraph * cg = ggml_new_graph(ffn_ctx);
-        ggml_build_forward_expand(cg, f2);
-        ggml_graph_compute_with_ctx(ffn_ctx, cg, 1);
-        const float * f2d = (const float*)f2->data;
-        for (int t = 0; t < n_tokens; t++)
-            for (int i = 0; i < hidden; i++)
-                out[t*hidden+i] = h[t*hidden+i] + gml[i] * f2d[t*hidden+i];
+        int ffn_size = DIT_FFN_SIZE;
+        static thread_local float * ffn_tmp_buf = nullptr;
+        static thread_local float * ffn_out_buf = nullptr;
+        static thread_local int ffn_buf_capacity = 0;
+        int needed = n_tokens * ffn_size;
+        if (needed > ffn_buf_capacity) {
+            delete[] ffn_tmp_buf; delete[] ffn_out_buf;
+            ffn_buf_capacity = needed;
+            ffn_tmp_buf = new float[ffn_buf_capacity];
+            ffn_out_buf = new float[ffn_buf_capacity];  // oversized but safe
+        }
+        float * ffn_tmp = ffn_tmp_buf;
+        float * ffn_out = ffn_out_buf;
+        manual_linear(ffn_tmp, mod, tensor_data(block.ffn_w1), block.ffn_b1 ? tensor_data(block.ffn_b1) : nullptr, hidden, ffn_size);
+        // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        const float c1 = 0.7978845608028654f;
+        const float c2 = 0.044715f;
+        for (int i = 0; i < n_tokens * ffn_size; i++) {
+            float x = ffn_tmp[i];
+            float x3 = x * x * x;
+            ffn_tmp[i] = 0.5f * x * (1.0f + tanhf(c1 * (x + c2 * x3)));
+        }
+        manual_linear(ffn_out, ffn_tmp, tensor_data(block.ffn_w2), block.ffn_b2 ? tensor_data(block.ffn_b2) : nullptr, ffn_size, hidden);
+        for (int i = 0; i < n_tokens * hidden; i++)
+            out[i] = h[i] + gml[i % hidden] * ffn_out[i];
     }
     delete[] cs; delete[] adaln_raw; delete[] normed; delete[] mod; delete[] ao; delete[] h;
 }

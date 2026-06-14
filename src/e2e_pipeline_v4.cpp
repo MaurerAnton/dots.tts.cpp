@@ -360,6 +360,19 @@ int main(int argc, char ** argv) {
     // EOS
     bool end_flag = false;
     
+    // Pre-allocate max-size DiT buffers to avoid heap fragmentation
+    int max_total_len = fm_capacity + patch_size;  // 126 + 4 = 130
+    float * dit_input_buf = new float[max_total_len * DIT_HIDDEN_SIZE]();
+    float * dit_cfg_buf = new float[max_total_len * DIT_HIDDEN_SIZE]();
+    bool * attn_mask_buf = new bool[max_total_len * max_total_len];
+    float * pos_ids_buf = new float[max_total_len];
+    float * h_seq_buf = new float[max_total_len * DIT_HIDDEN_SIZE];
+    float * bo_seq_buf = new float[max_total_len * DIT_HIDDEN_SIZE];
+    float * dit_ln_buf = new float[max_total_len * DIT_HIDDEN_SIZE];
+    float * out_all_buf = new float[max_total_len * VAE_LATENT_DIM];
+    float * ffn_tmp_buf = nullptr;  // allocated inside manual_dit_block, handled there
+    float * ffn_out_buf = nullptr;
+    
     for (int call = 0; call < n_calls_max && !end_flag; call++) {
         double tcall = now_ms();
         printf("  Call %d/%d: ", call+1, n_calls_max);
@@ -368,15 +381,21 @@ int main(int argc, char ** argv) {
         int history_bucket = fm_seq_len;  // no rounding when optimize is disabled
         int total_len = history_bucket + patch_size;
         
-        // Build attn_mask and pos_ids
-        bool * attn_mask = new bool[total_len * total_len];
-        float * pos_ids = new float[total_len];
+        // Build attn_mask and pos_ids (use pre-allocated max-size buffers)
+        bool * attn_mask = attn_mask_buf;
+        float * pos_ids = pos_ids_buf;
         build_fm_attn_mask(attn_mask, total_len, fm_seq_len, patch_size, HIDDEN_PATCH_SIZE);
         build_fm_pos_ids(pos_ids, total_len, fm_seq_len, patch_size);
+        // Zero out unused positions in the pre-allocated mask
+        if (total_len < max_total_len) {
+            memset(attn_mask + total_len * total_len, 0, (max_total_len * max_total_len - total_len * total_len) * sizeof(bool));
+        }
         
-        // Allocate DiT input sequence
-        float * dit_input = new float[total_len * DIT_HIDDEN_SIZE]();
-        float * dit_cfg_input = new float[total_len * DIT_HIDDEN_SIZE]();
+        // Use pre-allocated DiT input buffers (zeroed, then copy fm_buffer)
+        float * dit_input = dit_input_buf;
+        float * dit_cfg_input = dit_cfg_buf;
+        memset(dit_input, 0, total_len * DIT_HIDDEN_SIZE * sizeof(float));
+        memset(dit_cfg_input, 0, total_len * DIT_HIDDEN_SIZE * sizeof(float));
         memcpy(dit_input, fm_buffer, fm_seq_len * DIT_HIDDEN_SIZE * sizeof(float));
         memcpy(dit_cfg_input, fm_cfg_buffer, fm_seq_len * DIT_HIDDEN_SIZE * sizeof(float));
         
@@ -418,13 +437,13 @@ int main(int argc, char ** argv) {
             // Run DiT on conditional input (dit_input → vt_c)
             float * vt_c = new float[patch_flat];
             {
-                float * h_seq = new float[total_len * DIT_HIDDEN_SIZE];
+                float * h_seq = h_seq_buf;
                 float * iw = tensor_data(dit.input_layer_w);
                 float * ib = dit.input_layer_b ? tensor_data(dit.input_layer_b) : nullptr;
                 for (int ti = 0; ti < total_len; ti++)
                     manual_linear(h_seq + ti * DIT_HIDDEN_SIZE, dit_input + ti * DIT_HIDDEN_SIZE, iw, ib, DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE);
                 
-                float * bo_seq = new float[total_len * DIT_HIDDEN_SIZE];
+                float * bo_seq = bo_seq_buf;
                 for (int i = 0; i < dit.n_layers; i++) {
                     manual_dit_block(h_seq, cond, dit.layers[i], bo_seq, total_len, attn_mask, pos_ids);
                     float * tmp = h_seq; h_seq = bo_seq; bo_seq = tmp;
@@ -441,7 +460,7 @@ int main(int argc, char ** argv) {
                     mod_raw[o] = s;
                 }
                 float * dit_shift = mod_raw, * dit_scale = mod_raw + DIT_HIDDEN_SIZE;
-                float * dit_ln = new float[total_len * DIT_HIDDEN_SIZE];
+                float * dit_ln = dit_ln_buf;
                 for (int ti = 0; ti < total_len; ti++) {
                     manual_layernorm(dit_ln + ti * DIT_HIDDEN_SIZE, h_seq + ti * DIT_HIDDEN_SIZE, DIT_HIDDEN_SIZE);
                     for (int j = 0; j < DIT_HIDDEN_SIZE; j++)
@@ -449,17 +468,14 @@ int main(int argc, char ** argv) {
                 }
                 float * ow = tensor_data(dit.out_proj_w);
                 float * ob = dit.out_proj_b ? tensor_data(dit.out_proj_b) : nullptr;
-                float * out_all = new float[total_len * VAE_LATENT_DIM];
+                float * out_all = out_all_buf;
                 for (int ti = 0; ti < total_len; ti++)
                     manual_linear(out_all + ti * VAE_LATENT_DIM, dit_ln + ti * DIT_HIDDEN_SIZE, ow, ob, DIT_HIDDEN_SIZE, VAE_LATENT_DIM);
-                
-                delete[] h_seq; delete[] bo_seq; delete[] dit_ln;
                 
                 int latent_start = total_len - patch_size;
                 for (int p = 0; p < patch_size; p++)
                     for (int c = 0; c < VAE_LATENT_DIM; c++)
                         vt_c[p * VAE_LATENT_DIM + c] = out_all[(latent_start + p) * VAE_LATENT_DIM + c];
-                delete[] out_all;
             }
             
             // Run DiT on unconditional input (dit_cfg_input → vt_u)
@@ -515,9 +531,6 @@ int main(int argc, char ** argv) {
                 FILE * f = fopen(fn, "wb"); if(f){fwrite(z_t,sizeof(float),patch_flat,f);fclose(f);}
             }
         }
-        
-        delete[] dit_input; delete[] dit_cfg_input;
-        delete[] attn_mask; delete[] pos_ids;
         
         // Store raw latents (z-space, NOT denormalized!)
         memcpy(all_latents + call * patch_flat, z_t, patch_flat * sizeof(float));
@@ -661,6 +674,10 @@ int main(int argc, char ** argv) {
     }
     
     // Cleanup
+    delete[] dit_input_buf; delete[] dit_cfg_buf;
+    delete[] attn_mask_buf; delete[] pos_ids_buf;
+    delete[] h_seq_buf; delete[] bo_seq_buf;
+    delete[] dit_ln_buf; delete[] out_all_buf;
     delete[] schedule;
     delete[] lm_hiddens;
     delete[] all_latents;
