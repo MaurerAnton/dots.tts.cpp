@@ -24,7 +24,7 @@
 #include "llm_manual.h"
 #include "mt19937.h"
 #include "zig_normal.h"
-#include "noise_data_pipeline.h"
+#include "noise64.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -404,7 +404,7 @@ int main(int argc, char ** argv) {
         float * v_t = new float[patch_flat];
         
         // Initial noise
-        if (call < 30) memcpy(z_t, NOISE_PIPELINE[call], patch_flat * sizeof(float));
+        if (call < 30) memcpy(z_t, NOISE64[call], patch_flat * sizeof(float));
         else for (int i = 0; i < patch_flat; i++) { float z = zig_normal(mt); if(z>5)z=5; if(z<-5)z=-5; z_t[i]=z; }
         
         for (int step = 0; step < NFE; step++) {
