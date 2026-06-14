@@ -240,7 +240,7 @@ void llm_kv_cache_init(const LLMWeights & w, const int * token_ids, int n_tok,
     
     // Allocate cache
     cache.n_layers = N; cache.n_kv_heads = NKV; cache.head_dim = HD;
-    cache.max_seq = n_tok + 16;
+    cache.max_seq = n_tok + 256;  // enough for text tokens + audio calls
     cache.seq_len = n_tok;
     cache.k_cache = (float**)malloc(N * sizeof(float*));
     cache.v_cache = (float**)malloc(N * sizeof(float*));
